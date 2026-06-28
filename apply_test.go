@@ -84,6 +84,36 @@ func TestValidate(tb *testing.T) {
 	}
 }
 
+func TestRewriteDefault(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, in, out string
+	}{
+		{`{"properties":{"a":{"default":1}}}`, `{}`, `{"a":1}`},
+		{`{"properties":{"a":{"default":1}}}`, `{"a":5}`, `{"a":5}`}, // present wins
+		{`{"properties":{"a":{"default":"x"},"b":{"default":[1,2]}}}`, `{"c":3}`, `{"c":3,"a":"x","b":[1,2]}`},
+		{`{"properties":{"a":{"default":{"k":true}}}}`, `{}`, `{"a":{"k":true}}`},
+		{`{"properties":{"a":{"type":"integer"}}}`, `{}`, `{}`}, // no default, no insert
+
+		{`{"properties":{"o":{"properties":{"x":{"default":1}}}}}`, `{"o":{}}`, `{"o":{"x":1}}`}, // nested
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		out, _, err := s.Rewrite(nil, []byte(tc.in))
+		if err != nil {
+			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("rewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
+	}
+}
+
 func TestRewriteCanonical(tb *testing.T) {
 	s, err := Compile([]byte(`{"type":"object"}`))
 	if err != nil {

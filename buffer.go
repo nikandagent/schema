@@ -151,8 +151,7 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 	case False:
 		return append(w, "false"...)
 	case Num, Str:
-		off, n := val.off(), val.arg()
-		return append(w, b.src[off:off+n]...)
+		return append(w, b.span(val)...)
 	case Array:
 		off, n := val.off(), val.arg()
 
@@ -214,3 +213,17 @@ func (op Opcode) off() int   { return int(op >> offShift) }
 
 func (op Opcode) str(src []byte) []byte        { return src[op.off() : op.off()+op.arg()] }
 func (op Opcode) nodes(code []Opcode) []Opcode { return code[op.off() : op.off()+op.arg()] }
+
+// span resolves a scalar's bytes across the input and synthesized-text tail:
+// off below len(src) is original input, above is appended during rewrite.
+func (b *Buffer) span(op Opcode) []byte {
+	off, n := op.off(), op.arg()
+
+	if off < len(b.src) {
+		return b.src[off : off+n]
+	}
+
+	off -= len(b.src)
+
+	return b.text[off : off+n]
+}

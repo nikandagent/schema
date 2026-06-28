@@ -12,7 +12,7 @@ type (
 	cur struct {
 		s *Schema // program
 
-		b Buffer // decoded data
+		b *Buffer // decoded data (reused &s.b)
 
 		rewrite bool
 		diag    []Diag
@@ -39,6 +39,7 @@ var ErrInvalid = errors.New("invalid")
 func (s *Schema) Validate(r []byte) ([]Diag, error) {
 	var c cur
 	c.s = s
+	c.b = &s.b
 
 	root, err := c.b.decode(r)
 	if err != nil {
@@ -53,6 +54,7 @@ func (s *Schema) Validate(r []byte) ([]Diag, error) {
 func (s *Schema) Rewrite(w, r []byte) ([]byte, []Diag, error) {
 	var c cur
 	c.s = s
+	c.b = &s.b
 	c.rewrite = true
 
 	root, err := c.b.decode(r)
@@ -66,8 +68,20 @@ func (s *Schema) Rewrite(w, r []byte) ([]byte, []Diag, error) {
 	return w, c.diag, diagsError(c.diag)
 }
 
-// apply runs program node op against data value val and returns the rewritten
-// value (val unchanged for now). Validation issues are collected in c.diag.
+// Two arenas, walked in parallel but never interlinked — each node's spans
+// point only into its own bytes:
+//
+//	schema  nodes s.code   | bytes s.schema            (read-only literals)
+//	data    nodes c.b.code | bytes c.b.src ++ c.b.text
+//
+// A block payload (off,count) indexes its arena's nodes; a span (off,len) its
+// bytes. Bytes slices are read-only, so rewrites that synthesize literals
+// (defaults, canon) copy the bytes into the writable c.b.text tail and build
+// nodes in c.b.code (data is where changes live). Data spans resolve a virtual
+// src++text concat by off vs len(src), so the input is never copied.
+
+// apply runs program node op against data value val and returns the (possibly
+// rewritten) value. Validation issues are collected in c.diag.
 func (c *cur) apply(op, val Opcode) Opcode {
 	// Type-specific keywords are guarded on the value's type: per spec a keyword
 	// that doesn't apply to the instance type imposes no constraint (it passes).
@@ -85,7 +99,7 @@ func (c *cur) apply(op, val Opcode) Opcode {
 	case Type:
 		c.checkType(op, val)
 	case Properties:
-		c.checkProps(op, val)
+		val = c.checkProps(op, val)
 	case Required:
 		c.checkRequired(op, val)
 	case MinProps:
@@ -184,23 +198,150 @@ func (c *cur) checkType(op, val Opcode) {
 	}
 }
 
-func (c *cur) checkProps(op, val Opcode) {
+func (c *cur) checkProps(op, val Opcode) Opcode {
 	if val.Op() != Object {
-		return
+		return val
 	}
 
+	if !c.rewrite {
+		c.validateProps(op, val)
+		return val
+	}
+
+	return c.rewriteProps(op, val)
+}
+
+func (c *cur) validateProps(op, val Opcode) {
 	off, n := op.off(), op.arg()
 
 	for i := range n {
 		key := c.s.code[off+2*i]
 		sub := c.s.code[off+2*i+1]
 
-		mv, ok := c.member(val, key)
-		if !ok {
-			continue // absent: default handling is a later slice
+		if mv, ok := c.member(val, key); ok {
+			c.apply(sub, mv)
+		}
+	}
+}
+
+// rewriteProps rebuilds the object with rewritten members and inserted defaults,
+// returning val unchanged when nothing moved (structural sharing).
+func (c *cur) rewriteProps(op, val Opcode) Opcode {
+	mark := len(c.b.tmp)
+	defer func() { c.b.tmp = c.b.tmp[:mark] }()
+
+	dirty := false
+
+	voff, vn := val.off(), val.arg()
+
+	for i := range vn {
+		key := c.b.code[voff+2*i]
+		v := c.b.code[voff+2*i+1]
+
+		if sub, ok := c.propSub(op, key); ok {
+			if nv := c.apply(sub, v); nv != v {
+				v = nv
+				dirty = true
+			}
 		}
 
-		c.apply(sub, mv)
+		c.b.tmp = append(c.b.tmp, key, v)
+	}
+
+	off, n := op.off(), op.arg()
+
+	for i := range n {
+		key := c.s.code[off+2*i]
+
+		if _, ok := c.member(val, key); ok {
+			continue
+		}
+
+		if dv, ok := c.defaultOf(c.s.code[off+2*i+1]); ok {
+			c.b.tmp = append(c.b.tmp, c.copyLit(key), c.copyLit(dv))
+			dirty = true
+		}
+	}
+
+	if !dirty {
+		return val
+	}
+
+	cnt := (len(c.b.tmp) - mark) / 2
+	noff := len(c.b.code)
+	c.b.code = append(c.b.code, c.b.tmp[mark:]...)
+
+	return makeNode(Object, noff, cnt)
+}
+
+func (c *cur) propSub(op, key Opcode) (Opcode, bool) {
+	off, n := op.off(), op.arg()
+
+	for i := range n {
+		if c.keyEq(key, c.s.code[off+2*i]) {
+			return c.s.code[off+2*i+1], true
+		}
+	}
+
+	return 0, false
+}
+
+func (c *cur) defaultOf(sub Opcode) (Opcode, bool) {
+	if sub.Op() != And {
+		return 0, false
+	}
+
+	for _, ch := range sub.nodes(c.s.code) {
+		if ch.Op() == Default {
+			return c.s.code[ch.off()], true
+		}
+	}
+
+	return 0, false
+}
+
+// copyLit copies a schema literal into the data arena: scalar bytes into the
+// writable text tail, container structure into the node arena.
+func (c *cur) copyLit(lit Opcode) Opcode {
+	switch lit.Op() {
+	case Null, True, False:
+		return lit
+	case Num, Str:
+		b := lit.str(c.s.schema)
+		off := len(c.b.src) + len(c.b.text)
+		c.b.text = append(c.b.text, b...)
+
+		return makeNode(lit.Op(), off, len(b))
+	case Array:
+		mark := len(c.b.tmp)
+		defer func() { c.b.tmp = c.b.tmp[:mark] }()
+
+		for _, ch := range lit.nodes(c.s.code) {
+			c.b.tmp = append(c.b.tmp, c.copyLit(ch))
+		}
+
+		cnt := len(c.b.tmp) - mark
+		off := len(c.b.code)
+		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
+
+		return makeNode(Array, off, cnt)
+	case Object:
+		mark := len(c.b.tmp)
+		defer func() { c.b.tmp = c.b.tmp[:mark] }()
+
+		o, n := lit.off(), lit.arg()
+
+		for i := range n {
+			c.b.tmp = append(c.b.tmp, c.copyLit(c.s.code[o+2*i]), c.copyLit(c.s.code[o+2*i+1]))
+		}
+
+		cnt := (len(c.b.tmp) - mark) / 2
+		off := len(c.b.code)
+		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
+
+		return makeNode(Object, off, cnt)
+	default:
+		panic(lit)
 	}
 }
 
@@ -240,7 +381,7 @@ func (c *cur) checkUnique(op, val Opcode) {
 
 	for i := range n {
 		for j := i + 1; j < n; j++ {
-			if equalBuf(&c.b, c.b.code[off+i], &c.b, c.b.code[off+j]) {
+			if equalBuf(c.b, c.b.code[off+i], c.b, c.b.code[off+j]) {
 				c.fail(op, val, "duplicate items")
 				return
 			}
@@ -313,16 +454,16 @@ func (c *cur) member(obj, key Opcode) (Opcode, bool) {
 }
 
 func (c *cur) keyEq(data, schema Opcode) bool {
-	return bytes.Equal(data.str(c.b.src), schema.str(c.s.schema))
+	return bytes.Equal(c.b.span(data), schema.str(c.s.schema))
 }
 
 func (c *cur) equalLit(val, lit Opcode) bool {
 	sb := Buffer{code: c.s.code, src: c.s.schema}
-	return equalBuf(&c.b, val, &sb, lit)
+	return equalBuf(c.b, val, &sb, lit)
 }
 
 func (c *cur) number(val Opcode) float64 {
-	v, _ := json2.Value(val.str(c.b.src)).Float64()
+	v, _ := json2.Value(c.b.span(val)).Float64()
 	return v
 }
 
@@ -384,12 +525,12 @@ func equalBuf(lb *Buffer, l Opcode, rb *Buffer, r Opcode) bool {
 	case Null, True, False:
 		return true
 	case Num:
-		lv, _ := json2.Value(l.str(lb.src)).Float64()
-		rv, _ := json2.Value(r.str(rb.src)).Float64()
+		lv, _ := json2.Value(lb.span(l)).Float64()
+		rv, _ := json2.Value(rb.span(r)).Float64()
 
 		return lv == rv
 	case Str:
-		return bytes.Equal(l.str(lb.src), r.str(rb.src))
+		return bytes.Equal(lb.span(l), rb.span(r))
 	case Array:
 		lo, ln := l.off(), l.arg()
 		ro, rn := r.off(), r.arg()

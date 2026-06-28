@@ -12,6 +12,8 @@ type (
 		defs []def
 
 		tmp []Opcode
+
+		b Buffer // reused data arena for Validate/Rewrite
 	}
 
 	// Opcode is a schema instruction.
