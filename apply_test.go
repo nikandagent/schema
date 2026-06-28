@@ -102,6 +102,8 @@ func TestRewriteDefault(tb *testing.T) {
 			continue
 		}
 
+		s.Flags.Set(KeepKeyOrder) // assert input order + appended defaults
+
 		out, _, err := s.Rewrite(nil, []byte(tc.in))
 		if err != nil {
 			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
@@ -110,6 +112,64 @@ func TestRewriteDefault(tb *testing.T) {
 
 		if got := string(out); got != tc.out {
 			tb.Errorf("rewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
+	}
+}
+
+func TestRewriteReorder(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, in, out string
+	}{
+		{`{"properties":{"a":{},"b":{}}}`, `{"b":2,"a":1}`, `{"a":1,"b":2}`},             // reorder to declared
+		{`{"properties":{"a":{},"b":{}}}`, `{"a":1,"b":2}`, `{"a":1,"b":2}`},             // already canonical
+		{`{"properties":{"a":{"default":1},"b":{}}}`, `{"b":2}`, `{"a":1,"b":2}`},        // default into slot
+		{`{"properties":{"a":{},"b":{}}}`, `{"c":3,"b":2,"a":1}`, `{"a":1,"b":2,"c":3}`}, // ungoverned last
+		{`{"properties":{"a":{}}}`, `{"a":1,"c":3}`, `{"a":1,"c":3}`},                    // governed then ungoverned, unchanged
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		out, _, err := s.Rewrite(nil, []byte(tc.in))
+		if err != nil {
+			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("rewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
+	}
+}
+
+func TestRewriteFlags(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, in, out string
+		flags           Flags
+	}{
+		{`{"properties":{"a":{"default":1}}}`, `{}`, `{}`, KeepMissing},                    // default not filled
+		{`{"properties":{"a":{},"b":{}}}`, `{"b":2,"a":1}`, `{"b":2,"a":1}`, KeepKeyOrder}, // not reordered
+		{`{"properties":{"a":{"default":1},"b":{}}}`, `{"b":2}`, `{"b":2}`, DataPreserve},  // neither
+		{`{"properties":{"a":{"default":1},"b":{}}}`, `{"b":2}`, `{"a":1,"b":2}`, 0},       // default-on, reorder-on
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		s.Flags = tc.flags
+
+		out, _, err := s.Rewrite(nil, []byte(tc.in))
+		if err != nil {
+			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("rewrite %s flags=%b against %s: got %q, want %q", tc.in, tc.flags, tc.schema, got, tc.out)
 		}
 	}
 }

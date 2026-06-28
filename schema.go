@@ -2,7 +2,7 @@ package schema
 
 type (
 	Schema struct {
-		RejectUnknownKeywords bool // reject typos instead of keeping them (spec ignores unknowns)
+		Flags Flags // canonicalization switches; the zero value is the canonical default
 
 		root Opcode
 		code []Opcode
@@ -18,7 +18,27 @@ type (
 
 	// Opcode is a schema instruction.
 	Opcode uint64
+
+	// Flags select deviations from the canonical default. The zero value
+	// canonicalizes both schema and data and fills defaults; the Keep* bits opt
+	// out of a step, RejectUnknown opts in.
+	Flags uint32
 )
+
+const (
+	SchemaKeepOrder     Flags = 1 << iota // keep authored keyword & required order, don't canonicalize
+	SchemaRejectUnknown                   // reject unknown keywords instead of keeping them (spec keeps)
+	KeepKeyOrder                          // keep input object-key order, don't reorder to properties
+	KeepMissing                           // keep missing properties absent, don't fill defaults
+)
+
+// DataPreserve rewrites data without changing its content: no reordering and no
+// inserted defaults. Whitespace is still normalized.
+const DataPreserve = KeepKeyOrder | KeepMissing
+
+func (f Flags) Is(g Flags) bool { return f&g == g }
+func (f *Flags) Set(g Flags)    { *f |= g }
+func (f *Flags) Unset(g Flags)  { *f &^= g }
 
 // word: payload:56 | shape:3 | code:5
 //

@@ -117,14 +117,16 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	s.canonRequired(s.tmp[mark:])
-	sortKeywords(s.tmp[mark:])
+	if !s.Flags.Is(SchemaKeepOrder) {
+		s.canonRequired(s.tmp[mark:])
+		sortKeywords(s.tmp[mark:])
+	}
 
-	arg := len(s.tmp) - mark
+	n := len(s.tmp) - mark
 	off := len(s.code)
 	s.code = append(s.code, s.tmp[mark:]...)
 
-	return makeNode(And, off, arg), i, nil
+	return makeNode(And, off, n), i, nil
 }
 
 func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
@@ -261,11 +263,11 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	arg := (len(s.tmp) - mark) / 2
+	n := (len(s.tmp) - mark) / 2
 	off := len(s.code)
 	s.code = append(s.code, s.tmp[mark:]...)
 
-	return makeNode(Properties, off, arg), i, nil
+	return makeNode(Properties, off, n), i, nil
 }
 
 func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
@@ -293,11 +295,11 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	arg := len(s.tmp) - mark
+	n := len(s.tmp) - mark
 	off := len(s.code)
 	s.code = append(s.code, s.tmp[mark:]...)
 
-	return makeNode(op, off, arg), i, nil
+	return makeNode(op, off, n), i, nil
 }
 
 func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
@@ -325,11 +327,11 @@ func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	arg := len(s.tmp) - mark
+	n := len(s.tmp) - mark
 	off := len(s.code)
 	s.code = append(s.code, s.tmp[mark:]...)
 
-	return makeNode(op, off, arg), i, nil
+	return makeNode(op, off, n), i, nil
 }
 
 func (s *Schema) kwSub(op Opcode, b []byte, st int) (Opcode, int, error) {
@@ -474,9 +476,9 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 // kwUnknown keeps keywords outside the compiled set as a Raw node so Format can
 // emit them back: annotations and known-but-unsupported keywords always, typos
-// only unless RejectUnknownKeywords is set (the spec ignores unknowns).
+// only unless SchemaRejectUnknown is set (the spec ignores unknowns).
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
-	if !knownKeyword(name) && s.RejectUnknownKeywords {
+	if !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown) {
 		return 0, st, ErrSchema
 	}
 

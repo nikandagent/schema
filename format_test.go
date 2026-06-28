@@ -56,3 +56,24 @@ func TestFormat(tb *testing.T) {
 		}
 	}
 }
+
+func TestFormatKeepOrder(tb *testing.T) {
+	// SchemaKeepOrder preserves authored keyword and required order.
+	for _, in := range []string{
+		`{"default":{"x":1},"type":"object"}`,
+		`{"title":"x","description":"y","type":"string"}`,
+		`{"properties":{"a":{"type":"integer"},"b":{"type":"string"}},"required":["b","a"]}`,
+	} {
+		s := Schema{Flags: SchemaKeepOrder}
+
+		err := s.Compile([]byte(in))
+		if err != nil {
+			tb.Errorf("compile %q: %v", in, err)
+			continue
+		}
+
+		if got := string(s.Format(nil)); got != in {
+			tb.Errorf("format %q: got %q, want %q", in, got, in)
+		}
+	}
+}

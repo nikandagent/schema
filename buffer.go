@@ -98,11 +98,11 @@ func (b *Buffer) array(r []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	arg := len(b.tmp) - mark
+	n := len(b.tmp) - mark
 	off := len(b.code)
 	b.code = append(b.code, b.tmp[mark:]...)
 
-	return makeNode(Array, off, arg), i, nil
+	return makeNode(Array, off, n), i, nil
 }
 
 func (b *Buffer) object(r []byte, st int) (Opcode, int, error) {
@@ -135,11 +135,11 @@ func (b *Buffer) object(r []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	arg := (len(b.tmp) - mark) / 2
+	n := (len(b.tmp) - mark) / 2
 	off := len(b.code)
 	b.code = append(b.code, b.tmp[mark:]...)
 
-	return makeNode(Object, off, arg), i, nil
+	return makeNode(Object, off, n), i, nil
 }
 
 func (b *Buffer) encode(w []byte, val Opcode) []byte {
@@ -153,32 +153,32 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 	case Num, Str:
 		return append(w, b.span(val)...)
 	case Array:
-		off, n := val.off(), val.arg()
+		voff, vn := val.off(), val.arg()
 
 		w = append(w, '[')
 
-		for i := range n {
+		for i := range vn {
 			if i != 0 {
 				w = append(w, ',')
 			}
 
-			w = b.encode(w, b.code[off+i])
+			w = b.encode(w, b.code[voff+i])
 		}
 
 		return append(w, ']')
 	case Object:
-		off, n := val.off(), val.arg()
+		voff, vn := val.off(), val.arg()
 
 		w = append(w, '{')
 
-		for i := range n {
+		for i := range vn {
 			if i != 0 {
 				w = append(w, ',')
 			}
 
-			w = b.encode(w, b.code[off+2*i])
+			w = b.encode(w, b.code[voff+2*i])
 			w = append(w, ':')
-			w = b.encode(w, b.code[off+2*i+1])
+			w = b.encode(w, b.code[voff+2*i+1])
 		}
 
 		return append(w, '}')
@@ -187,15 +187,15 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 	}
 }
 
-func makeNode(op Opcode, off, arg int) Opcode {
+func makeNode(op Opcode, off, n int) Opcode {
 	if off < 0 || off > maxOff {
 		panic(off)
 	}
-	if arg < 0 || arg > maxArg {
-		panic(arg)
+	if n < 0 || n > maxArg {
+		panic(n)
 	}
 
-	return op | Opcode(arg)<<argShift | Opcode(off)<<offShift
+	return op | Opcode(n)<<argShift | Opcode(off)<<offShift
 }
 
 func makeImm(op Opcode, v int) Opcode {

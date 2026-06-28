@@ -218,7 +218,7 @@ func (c *cur) validateProps(op, val Opcode) {
 		key := c.s.code[off+2*i]
 		sub := c.s.code[off+2*i+1]
 
-		if mv, ok := c.member(val, key); ok {
+		if _, mv, ok := c.member(val, key); ok {
 			c.apply(sub, mv)
 		}
 	}
@@ -230,6 +230,30 @@ func (c *cur) rewriteProps(op, val Opcode) Opcode {
 	mark := len(c.b.tmp)
 	defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
+	var dirty bool
+
+	if c.s.Flags.Is(KeepKeyOrder) {
+		dirty = c.orderedProps(op, val)
+	} else {
+		dirty = c.canonProps(op, val)
+	}
+
+	if !dirty {
+		return val
+	}
+
+	out := c.b.tmp[mark:]
+	n := len(out) / 2
+	off := len(c.b.code)
+	c.b.code = append(c.b.code, out...)
+
+	return makeNode(Object, off, n)
+}
+
+// orderedProps keeps the input key order, rewriting governed members in place
+// and appending defaults for missing keys at the end. It reports whether
+// anything changed.
+func (c *cur) orderedProps(op, val Opcode) bool {
 	dirty := false
 
 	voff, vn := val.off(), val.arg()
@@ -248,12 +272,16 @@ func (c *cur) rewriteProps(op, val Opcode) Opcode {
 		c.b.tmp = append(c.b.tmp, key, v)
 	}
 
+	if c.s.Flags.Is(KeepMissing) {
+		return dirty
+	}
+
 	off, n := op.off(), op.arg()
 
 	for i := range n {
 		key := c.s.code[off+2*i]
 
-		if _, ok := c.member(val, key); ok {
+		if _, _, ok := c.member(val, key); ok {
 			continue
 		}
 
@@ -263,15 +291,64 @@ func (c *cur) rewriteProps(op, val Opcode) Opcode {
 		}
 	}
 
-	if !dirty {
-		return val
+	return dirty
+}
+
+// canonProps emits governed keys in declared properties order, inserting
+// defaults into their natural slots, then the remaining keys in input order. It
+// reports dirty when an emitted pair lands in a different slot than the source
+// (reorder or rewritten value) or a default was inserted.
+func (c *cur) canonProps(op, val Opcode) bool {
+	voff, vn := val.off(), val.arg()
+
+	dirty := false
+	j := 0 // source member slot the next emitted pair is compared against
+
+	off, n := op.off(), op.arg()
+
+	for i := range n {
+		key := c.s.code[off+2*i]
+		sub := c.s.code[off+2*i+1]
+
+		if dk, v, ok := c.member(val, key); ok {
+			v = c.apply(sub, v)
+
+			if dk != c.b.code[voff+2*j] || v != c.b.code[voff+2*j+1] {
+				dirty = true
+			}
+
+			c.b.tmp = append(c.b.tmp, dk, v)
+			j++
+			continue
+		}
+
+		if c.s.Flags.Is(KeepMissing) {
+			continue
+		}
+
+		if dv, ok := c.defaultOf(sub); ok {
+			c.b.tmp = append(c.b.tmp, c.copyLit(key), c.copyLit(dv))
+			dirty = true
+		}
 	}
 
-	cnt := (len(c.b.tmp) - mark) / 2
-	noff := len(c.b.code)
-	c.b.code = append(c.b.code, c.b.tmp[mark:]...)
+	for i := range vn {
+		key := c.b.code[voff+2*i]
+		v := c.b.code[voff+2*i+1]
 
-	return makeNode(Object, noff, cnt)
+		if _, ok := c.propSub(op, key); ok {
+			continue
+		}
+
+		if key != c.b.code[voff+2*j] || v != c.b.code[voff+2*j+1] {
+			dirty = true
+		}
+
+		c.b.tmp = append(c.b.tmp, key, v)
+		j++
+	}
+
+	return dirty
 }
 
 func (c *cur) propSub(op, key Opcode) (Opcode, bool) {
@@ -320,26 +397,26 @@ func (c *cur) copyLit(lit Opcode) Opcode {
 			c.b.tmp = append(c.b.tmp, c.copyLit(ch))
 		}
 
-		cnt := len(c.b.tmp) - mark
+		n := len(c.b.tmp) - mark
 		off := len(c.b.code)
 		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
 
-		return makeNode(Array, off, cnt)
+		return makeNode(Array, off, n)
 	case Object:
 		mark := len(c.b.tmp)
 		defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
-		o, n := lit.off(), lit.arg()
+		voff, vn := lit.off(), lit.arg()
 
-		for i := range n {
-			c.b.tmp = append(c.b.tmp, c.copyLit(c.s.code[o+2*i]), c.copyLit(c.s.code[o+2*i+1]))
+		for i := range vn {
+			c.b.tmp = append(c.b.tmp, c.copyLit(c.s.code[voff+2*i]), c.copyLit(c.s.code[voff+2*i+1]))
 		}
 
-		cnt := (len(c.b.tmp) - mark) / 2
+		n := (len(c.b.tmp) - mark) / 2
 		off := len(c.b.code)
 		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
 
-		return makeNode(Object, off, cnt)
+		return makeNode(Object, off, n)
 	default:
 		panic(lit)
 	}
@@ -353,7 +430,7 @@ func (c *cur) checkRequired(op, val Opcode) {
 	off, n := op.off(), op.arg()
 
 	for i := range n {
-		if _, ok := c.member(val, c.s.code[off+i]); !ok {
+		if _, _, ok := c.member(val, c.s.code[off+i]); !ok {
 			c.fail(op, val, "missing required property")
 		}
 	}
@@ -365,10 +442,10 @@ func (c *cur) checkItems(op, val Opcode) {
 	}
 
 	sub := c.s.code[op.off()]
-	off, n := val.off(), val.arg()
+	voff, vn := val.off(), val.arg()
 
-	for i := range n {
-		c.apply(sub, c.b.code[off+i])
+	for i := range vn {
+		c.apply(sub, c.b.code[voff+i])
 	}
 }
 
@@ -377,11 +454,11 @@ func (c *cur) checkUnique(op, val Opcode) {
 		return
 	}
 
-	off, n := val.off(), val.arg()
+	voff, vn := val.off(), val.arg()
 
-	for i := range n {
-		for j := i + 1; j < n; j++ {
-			if equalBuf(c.b, c.b.code[off+i], c.b, c.b.code[off+j]) {
+	for i := range vn {
+		for j := i + 1; j < vn; j++ {
+			if equalBuf(c.b, c.b.code[voff+i], c.b, c.b.code[voff+j]) {
 				c.fail(op, val, "duplicate items")
 				return
 			}
@@ -441,16 +518,16 @@ func (c *cur) matches(op, val Opcode) bool {
 	return ok
 }
 
-func (c *cur) member(obj, key Opcode) (Opcode, bool) {
-	off, n := obj.off(), obj.arg()
+func (c *cur) member(obj, key Opcode) (k, v Opcode, ok bool) {
+	voff, vn := obj.off(), obj.arg()
 
-	for i := range n {
-		if c.keyEq(c.b.code[off+2*i], key) {
-			return c.b.code[off+2*i+1], true
+	for i := range vn {
+		if c.keyEq(c.b.code[voff+2*i], key) {
+			return c.b.code[voff+2*i], c.b.code[voff+2*i+1], true
 		}
 	}
 
-	return 0, false
+	return 0, 0, false
 }
 
 func (c *cur) keyEq(data, schema Opcode) bool {

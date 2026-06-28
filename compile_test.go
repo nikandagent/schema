@@ -20,22 +20,40 @@ func TestCompileError(tb *testing.T) {
 	}
 }
 
+func TestFlags(tb *testing.T) {
+	var f Flags
+
+	if f.Is(KeepMissing) {
+		tb.Errorf("zero Is(KeepMissing) = true")
+	}
+
+	f.Set(DataPreserve)
+	if !f.Is(KeepKeyOrder) || !f.Is(KeepMissing) || !f.Is(DataPreserve) {
+		tb.Errorf("after Set(DataPreserve): %b", f)
+	}
+
+	f.Unset(KeepKeyOrder)
+	if f.Is(KeepKeyOrder) || !f.Is(KeepMissing) {
+		tb.Errorf("after Unset(KeepKeyOrder): %b", f)
+	}
+}
+
 func TestRejectUnknownKeywords(tb *testing.T) {
 	// spec default keeps unknowns; the flag rejects typos but not known keywords.
 	for _, tc := range []struct {
-		in     string
-		reject bool
-		ok     bool
+		in    string
+		flags Flags
+		ok    bool
 	}{
-		{`{"nope":1}`, false, true},
-		{`{"nope":1}`, true, false},
-		{`{"if":{"type":"string"}}`, true, true}, // known-but-unsupported, kept
+		{`{"nope":1}`, 0, true},
+		{`{"nope":1}`, SchemaRejectUnknown, false},
+		{`{"if":{"type":"string"}}`, SchemaRejectUnknown, true}, // known-but-unsupported, kept
 	} {
-		s := Schema{RejectUnknownKeywords: tc.reject}
+		s := Schema{Flags: tc.flags}
 
 		err := s.Compile([]byte(tc.in))
 		if (err == nil) != tc.ok {
-			tb.Errorf("compile %q reject=%v: ok=%v, err=%v", tc.in, tc.reject, tc.ok, err)
+			tb.Errorf("compile %q flags=%b: ok=%v, err=%v", tc.in, tc.flags, tc.ok, err)
 		}
 	}
 }
