@@ -75,21 +75,21 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 	case Fail:
 		return append(w, "false"...)
 	case And:
-		off, n := op.off(), op.arg()
+		off, n := op.Off(), op.Arg()
 
 		w = append(w, '{')
 
 		for i := range n {
-			c := s.code[off+i]
+			c := s.prog.code[off+i]
 
 			if i != 0 {
 				w = append(w, ',')
 			}
 
 			if c.Op() == Raw {
-				w = s.lit(w, s.code[c.off()])
+				w = s.lit(w, s.prog.code[c.Off()])
 				w = append(w, ':')
-				w = s.lit(w, s.code[c.off()+1])
+				w = s.lit(w, s.prog.code[c.Off()+1])
 				continue
 			}
 
@@ -108,9 +108,9 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Type:
-		return s.formatType(w, op.imm())
+		return s.formatType(w, op.Imm())
 	case Properties:
-		off, n := op.off(), op.arg()
+		off, n := op.Off(), op.Arg()
 
 		w = append(w, '{')
 
@@ -119,14 +119,14 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = s.lit(w, s.code[off+2*i])
+			w = s.lit(w, s.prog.code[off+2*i])
 			w = append(w, ':')
-			w = s.format(w, s.code[off+2*i+1])
+			w = s.format(w, s.prog.code[off+2*i+1])
 		}
 
 		return append(w, '}')
 	case Required, Enum:
-		off, n := op.off(), op.arg()
+		off, n := op.Off(), op.Arg()
 
 		w = append(w, '[')
 
@@ -135,12 +135,12 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = s.lit(w, s.code[off+i])
+			w = s.lit(w, s.prog.code[off+i])
 		}
 
 		return append(w, ']')
 	case AllOf, AnyOf, OneOf:
-		off, n := op.off(), op.arg()
+		off, n := op.Off(), op.Arg()
 
 		w = append(w, '[')
 
@@ -149,23 +149,23 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = s.format(w, s.code[off+i])
+			w = s.format(w, s.prog.code[off+i])
 		}
 
 		return append(w, ']')
 	case Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
-		return s.lit(w, s.code[op.off()])
+		return s.lit(w, s.prog.code[op.Off()])
 	case Items, Additional, Not:
-		return s.format(w, s.code[op.off()])
+		return s.format(w, s.prog.code[op.Off()])
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
-		return strconv.AppendInt(w, int64(op.imm()), 10)
+		return strconv.AppendInt(w, int64(op.Imm()), 10)
 	case Unique:
 		return append(w, "true"...)
 	case Pattern:
-		return append(w, op.str(s.schema)...)
+		return append(w, s.prog.Span(op)...)
 	case Ref:
 		w = append(w, '"')
-		w = appendRef(w, op.str(s.schema))
+		w = appendRef(w, s.prog.Span(op))
 		return append(w, '"')
 	default:
 		panic(op)
@@ -174,7 +174,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 
 // lit renders a value literal, reusing the data encoder over the program arena.
 func (s *Schema) lit(w []byte, val Opcode) []byte {
-	bf := Buffer{code: s.code, src: s.schema}
+	bf := Buffer{code: s.prog.code, src: s.prog.src}
 	return bf.encode(w, val)
 }
 

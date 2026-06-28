@@ -36,10 +36,10 @@ func Compile(b []byte) (*Schema, error) {
 }
 
 func (s *Schema) Compile(b []byte) error {
-	s.schema = b
-	s.code = s.code[:0]
+	s.prog.src = b
+	s.prog.code = s.prog.code[:0]
 	s.defs = s.defs[:0]
-	s.tmp = s.tmp[:0]
+	s.prog.tmp = s.prog.tmp[:0]
 
 	var d json2.Iterator
 
@@ -83,8 +83,8 @@ func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
 }
 
 func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
-	mark := len(s.tmp)
-	defer func() { s.tmp = s.tmp[:mark] }()
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
 	var d json2.Iterator
 
@@ -110,7 +110,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 		}
 
 		if op != Pass {
-			s.tmp = append(s.tmp, op)
+			s.prog.tmp = append(s.prog.tmp, op)
 		}
 	}
 	if err != nil {
@@ -118,13 +118,13 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if !s.Flags.Is(SchemaKeepOrder) {
-		s.canonRequired(s.tmp[mark:])
-		sortKeywords(s.tmp[mark:])
+		s.canonRequired(s.prog.tmp[mark:])
+		sortKeywords(s.prog.tmp[mark:])
 	}
 
-	n := len(s.tmp) - mark
-	off := len(s.code)
-	s.code = append(s.code, s.tmp[mark:]...)
+	n := len(s.prog.tmp) - mark
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
 	return makeNode(And, off, n), i, nil
 }
@@ -234,8 +234,8 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 }
 
 func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
-	mark := len(s.tmp)
-	defer func() { s.tmp = s.tmp[:mark] }()
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
 	var d json2.Iterator
 
@@ -257,22 +257,22 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		s.tmp = append(s.tmp, key, sub)
+		s.prog.tmp = append(s.prog.tmp, key, sub)
 	}
 	if err != nil {
 		return 0, i, err
 	}
 
-	n := (len(s.tmp) - mark) / 2
-	off := len(s.code)
-	s.code = append(s.code, s.tmp[mark:]...)
+	n := (len(s.prog.tmp) - mark) / 2
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
 	return makeNode(Properties, off, n), i, nil
 }
 
 func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
-	mark := len(s.tmp)
-	defer func() { s.tmp = s.tmp[:mark] }()
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
 	var d json2.Iterator
 
@@ -289,22 +289,22 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		s.tmp = append(s.tmp, val)
+		s.prog.tmp = append(s.prog.tmp, val)
 	}
 	if err != nil {
 		return 0, i, err
 	}
 
-	n := len(s.tmp) - mark
-	off := len(s.code)
-	s.code = append(s.code, s.tmp[mark:]...)
+	n := len(s.prog.tmp) - mark
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
 	return makeNode(op, off, n), i, nil
 }
 
 func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
-	mark := len(s.tmp)
-	defer func() { s.tmp = s.tmp[:mark] }()
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
 	var d json2.Iterator
 
@@ -321,15 +321,15 @@ func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		s.tmp = append(s.tmp, sub)
+		s.prog.tmp = append(s.prog.tmp, sub)
 	}
 	if err != nil {
 		return 0, i, err
 	}
 
-	n := len(s.tmp) - mark
-	off := len(s.code)
-	s.code = append(s.code, s.tmp[mark:]...)
+	n := len(s.prog.tmp) - mark
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
 	return makeNode(op, off, n), i, nil
 }
@@ -340,8 +340,8 @@ func (s *Schema) kwSub(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	off := len(s.code)
-	s.code = append(s.code, sub)
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, sub)
 
 	return makeNode(op, off, 1), i, nil
 }
@@ -352,8 +352,8 @@ func (s *Schema) kwValue(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	off := len(s.code)
-	s.code = append(s.code, val)
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, val)
 
 	return makeNode(op, off, 1), i, nil
 }
@@ -496,15 +496,15 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	off := len(s.code)
-	s.code = append(s.code, key, val)
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, key, val)
 
 	return makeNode(Raw, off, 2), i, nil
 }
 
 func (s *Schema) checkRefs() error {
-	for _, op := range s.code {
-		if op.Op() == Ref && s.refTarget(op) == Err {
+	for _, op := range s.prog.code {
+		if op.Op() == Ref && s.refTarget(op) == bad {
 			return ErrSchema
 		}
 	}
@@ -515,7 +515,7 @@ func (s *Schema) checkRefs() error {
 // refTarget resolves a Ref against the flat global defs table. The latest
 // spec's $ref scoping and nested $defs base resolution are not modeled.
 func (s *Schema) refTarget(op Opcode) Opcode {
-	name := op.str(s.schema)
+	name := s.prog.Span(op)
 
 	if string(name) == "#" {
 		return s.root
@@ -527,18 +527,18 @@ func (s *Schema) refTarget(op Opcode) Opcode {
 		}
 	}
 
-	return Err
+	return bad
 }
 
 // literal decodes a JSON value into the program arena, reusing the data
 // decoder. Spans point into the schema source.
 func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {
-	bf := Buffer{code: s.code, src: b, tmp: s.tmp}
+	bf := Buffer{code: s.prog.code, src: b, tmp: s.prog.tmp}
 
 	val, i, err := bf.value(b, st)
 
-	s.code = bf.code
-	s.tmp = bf.tmp
+	s.prog.code = bf.code
+	s.prog.tmp = bf.tmp
 
 	return val, i, err
 }
@@ -617,7 +617,7 @@ func (s *Schema) canonRequired(and []Opcode) {
 		return
 	}
 
-	names := req.nodes(s.code)
+	names := s.prog.Nodes(req)
 
 	for i := 1; i < len(names); i++ {
 		for j := i; j > 0 && s.propIndex(props, names[j]) < s.propIndex(props, names[j-1]); j-- {
@@ -627,10 +627,10 @@ func (s *Schema) canonRequired(and []Opcode) {
 }
 
 func (s *Schema) propIndex(props, name Opcode) int {
-	off, n := props.off(), props.arg()
+	off, n := props.Off(), props.Arg()
 
 	for i := range n {
-		if string(s.code[off+2*i].str(s.schema)) == string(name.str(s.schema)) {
+		if string(s.prog.Span(s.prog.code[off+2*i])) == string(s.prog.Span(name)) {
 			return i
 		}
 	}

@@ -151,9 +151,9 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 	case False:
 		return append(w, "false"...)
 	case Num, Str:
-		return append(w, b.span(val)...)
+		return append(w, b.Span(val)...)
 	case Array:
-		voff, vn := val.off(), val.arg()
+		voff, vn := val.Off(), val.Arg()
 
 		w = append(w, '[')
 
@@ -167,7 +167,7 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 
 		return append(w, ']')
 	case Object:
-		voff, vn := val.off(), val.arg()
+		voff, vn := val.Off(), val.Arg()
 
 		w = append(w, '{')
 
@@ -206,18 +206,27 @@ func makeImm(op Opcode, v int) Opcode {
 	return op | Opcode(v)<<argShift
 }
 
-func (op Opcode) Op() Opcode { return op & 0xff }
-func (op Opcode) imm() int   { return int(op >> argShift) }
-func (op Opcode) arg() int   { return int(op >> argShift & maxArg) }
-func (op Opcode) off() int   { return int(op >> offShift) }
+func (op Opcode) Op() Opcode { return op & opMask }
+func (op Opcode) Imm() int   { return int(op >> argShift) }
+func (op Opcode) Arg() int   { return int(op >> argShift & maxArg) }
+func (op Opcode) Off() int   { return int(op >> offShift) }
 
-func (op Opcode) str(src []byte) []byte        { return src[op.off() : op.off()+op.arg()] }
-func (op Opcode) nodes(code []Opcode) []Opcode { return code[op.off() : op.off()+op.arg()] }
+// Nodes returns a block's child words: an Array's n elements, an Object's n
+// key/value pairs (2n words), or a keyword block's operands — what a handler
+// iterates to walk into a container. Object and Properties count pairs.
+func (b *Buffer) Nodes(op Opcode) []Opcode {
+	off, n := op.Off(), op.Arg()
+	if op.Op() == Object || op.Op() == Properties {
+		n *= 2
+	}
 
-// span resolves a scalar's bytes across the input and synthesized-text tail:
+	return b.code[off : off+n]
+}
+
+// Span resolves a scalar's bytes across the input and synthesized-text tail:
 // off below len(src) is original input, above is appended during rewrite.
-func (b *Buffer) span(op Opcode) []byte {
-	off, n := op.off(), op.arg()
+func (b *Buffer) Span(op Opcode) []byte {
+	off, n := op.Off(), op.Arg()
 
 	if off < len(b.src) {
 		return b.src[off : off+n]

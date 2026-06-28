@@ -5,13 +5,9 @@ type (
 		Flags Flags // canonicalization switches; the zero value is the canonical default
 
 		root Opcode
-		code []Opcode
-
-		schema []byte
+		prog Buffer // compiled program: code nodes + schema bytes (src) + compile scratch (tmp)
 
 		defs []def
-
-		tmp []Opcode
 
 		b Buffer // reused data arena for Validate/Rewrite
 	}
@@ -50,8 +46,7 @@ func (f *Flags) Unset(g Flags)  { *f &^= g }
 //	ref    target:32 |   arg:24
 const (
 	shapeShift = 5
-	shapeMask  = 7 << shapeShift
-	codeMask   = 1<<shapeShift - 1
+	opMask     = 1<<8 - 1
 
 	argShift = 8
 	offShift = 32
@@ -71,7 +66,7 @@ const (
 // imm
 const (
 	Pass Opcode = imm | iota
-	Err
+	bad
 	Fail
 	Null
 	False

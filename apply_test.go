@@ -1,6 +1,9 @@
 package schema
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestValidate(tb *testing.T) {
 	for _, tc := range []struct {
@@ -171,6 +174,194 @@ func TestRewriteFlags(tb *testing.T) {
 		if got := string(out); got != tc.out {
 			tb.Errorf("rewrite %s flags=%b against %s: got %q, want %q", tc.in, tc.flags, tc.schema, got, tc.out)
 		}
+	}
+}
+
+func TestWalk(tb *testing.T) {
+	delegate := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+
+	// 1. delegating handler reproduces default Validate.
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"type":"string"}`, `"x"`, true},
+		{`{"type":"string"}`, `1`, false},
+		{`{"required":["a"]}`, `{}`, false},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		wd, we := s.Walk([]byte(tc.data), delegate)
+		vd, ve := s.Validate([]byte(tc.data))
+
+		if (we == nil) != (ve == nil) || len(wd) != len(vd) {
+			tb.Errorf("walk delegate %s vs validate: we=%v ve=%v wd=%d vd=%d", tc.data, we, ve, len(wd), len(vd))
+		}
+
+		if (we == nil) != tc.ok {
+			tb.Errorf("walk %s against %s: ok=%v err=%v", tc.data, tc.schema, tc.ok, we)
+		}
+	}
+
+	// 2. a custom error aborts the walk and propagates out.
+	myErr := errors.New("boom")
+	s, _ := Compile([]byte(`{"type":"string"}`))
+
+	fail := func(c Applier, op, val Opcode) (Opcode, error) { return 0, myErr }
+	if _, err := s.Walk([]byte(`"x"`), fail); !errors.Is(err, myErr) {
+		tb.Errorf("custom error: got %v, want %v", err, myErr)
+	}
+
+	// 3. ErrBreak is a clean stop; traversal halts before recursing.
+	n := 0
+	brk := func(c Applier, op, val Opcode) (Opcode, error) {
+		n++
+		return val, ErrBreak
+	}
+
+	bs, _ := Compile([]byte(`{"type":"string","minLength":2}`))
+	if d, err := bs.Walk([]byte(`"x"`), brk); err != nil || n != 1 || len(d) != 0 {
+		tb.Errorf("ErrBreak: err=%v calls=%d diag=%d, want nil/1/0", err, n, len(d))
+	}
+
+	// 4. c.Fail adds a diag and the verdict is invalid.
+	rep := func(c Applier, op, val Opcode) (Opcode, error) {
+		c.Fail(op, val, "handler says no")
+		return val, ErrBreak
+	}
+
+	if d, err := s.Walk([]byte(`"x"`), rep); !errors.Is(err, ErrInvalid) || len(d) != 1 || d[0].Msg != "handler says no" {
+		tb.Errorf("Fail: err=%v diag=%+v", err, d)
+	}
+}
+
+func TestWalkRewrite(tb *testing.T) {
+	delegate := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+
+	// delegating handler reproduces the default rewrite: fills defaults, reorders.
+	for _, tc := range []struct{ schema, in, out string }{
+		{`{"properties":{"a":{"default":1},"b":{}}}`, `{"b":2}`, `{"a":1,"b":2}`},
+		{`{"properties":{"a":{},"b":{}}}`, `{"b":2,"a":1}`, `{"a":1,"b":2}`},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		out, _, err := s.WalkRewrite(nil, []byte(tc.in), delegate)
+		if err != nil {
+			tb.Errorf("walkrewrite %s: %v", tc.in, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("walkrewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
+	}
+
+	// a custom error aborts WalkRewrite too.
+	myErr := errors.New("boom")
+	s, _ := Compile([]byte(`{"type":"object"}`))
+
+	fail := func(c Applier, op, val Opcode) (Opcode, error) { return 0, myErr }
+	if _, _, err := s.WalkRewrite(nil, []byte(`{}`), fail); !errors.Is(err, myErr) {
+		tb.Errorf("walkrewrite custom error: got %v, want %v", err, myErr)
+	}
+}
+
+func TestWalkRead(tb *testing.T) {
+	// A handler reads every scalar via the public Opcode/Buffer API while still
+	// delegating, so validation is unchanged.
+	got := map[string]bool{}
+
+	var collect func(b *Buffer, val Opcode)
+	collect = func(b *Buffer, val Opcode) {
+		switch val.Op() {
+		case Num, Str:
+			got[string(b.Span(val))] = true
+		case Array:
+			for _, e := range b.Nodes(val) {
+				collect(b, e)
+			}
+		case Object:
+			ns := b.Nodes(val)
+			if len(ns) != 2*val.Arg() { // regression guard: Object Nodes returns 2n words
+				tb.Errorf("object nodes: got %d words, want %d (arg=%d)", len(ns), 2*val.Arg(), val.Arg())
+			}
+
+			for i := 0; i < len(ns); i += 2 {
+				collect(b, ns[i])   // key
+				collect(b, ns[i+1]) // value
+			}
+		}
+	}
+
+	h := func(c Applier, op, val Opcode) (Opcode, error) {
+		collect(c.Buf(), val)
+		return c.Apply(op, val)
+	}
+
+	s, err := Compile([]byte(`{"type":"object"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if _, err := s.Walk([]byte(`{"a":1,"b":["x",2]}`), h); err != nil {
+		tb.Fatalf("walk: %v", err)
+	}
+
+	want := map[string]bool{`"a"`: true, "1": true, `"b"`: true, `"x"`: true, "2": true}
+	for g := range got {
+		if !want[g] {
+			tb.Errorf("unexpected scalar %q", g)
+		}
+
+		delete(want, g)
+	}
+
+	if len(want) != 0 {
+		tb.Errorf("missing scalars %v, got %v", want, got)
+	}
+}
+
+func TestWalkSchemaBuf(tb *testing.T) {
+	// A handler reads the program arena via SchemaBuf: a Properties op holds 2n
+	// words (key, subschema, ...) for its n declared properties.
+	var saw bool
+
+	h := func(c Applier, op, val Opcode) (Opcode, error) {
+		if op.Op() == Properties {
+			saw = true
+
+			ns := c.SchemaBuf().Nodes(op)
+			if len(ns) != 2*op.Arg() {
+				tb.Errorf("properties nodes: got %d words, want %d (arg=%d)", len(ns), 2*op.Arg(), op.Arg())
+			}
+
+			if got := string(c.SchemaBuf().Span(ns[0])); got != `"a"` {
+				tb.Errorf("first property key: got %q, want %q", got, `"a"`)
+			}
+		}
+
+		return c.Apply(op, val)
+	}
+
+	s, err := Compile([]byte(`{"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if _, err := s.Walk([]byte(`{"a":1,"b":"x"}`), h); err != nil {
+		tb.Fatalf("walk: %v", err)
+	}
+
+	if !saw {
+		tb.Errorf("handler never saw a Properties op")
 	}
 }
 
