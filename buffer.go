@@ -211,3 +211,6 @@ func (op Opcode) Op() Opcode { return op & 0xff }
 func (op Opcode) imm() int   { return int(op >> argShift) }
 func (op Opcode) arg() int   { return int(op >> argShift & maxArg) }
 func (op Opcode) off() int   { return int(op >> offShift) }
+
+func (op Opcode) str(src []byte) []byte        { return src[op.off() : op.off()+op.arg()] }
+func (op Opcode) nodes(code []Opcode) []Opcode { return code[op.off() : op.off()+op.arg()] }

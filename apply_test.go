@@ -58,6 +58,18 @@ func TestValidate(tb *testing.T) {
 			`{"items":[{"id":1},{"id":2}]}`, true},
 		{`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
 			`{"items":[{"id":1},{"name":"x"}]}`, false},
+
+		{`{"title":"x","type":"string"}`, `"y"`, true}, // annotation ignored
+
+		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":5}`, true},
+		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":-1}`, false},
+		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":"x"}`, false},
+
+		{`{"type":"object","properties":{"self":{"$ref":"#"}}}`, `{"self":{"self":{}}}`, true},
+		{`{"type":"object","properties":{"self":{"$ref":"#"}}}`, `{"self":5}`, false},
+
+		{`{"$defs":{"node":{"type":"object","properties":{"next":{"$ref":"#/$defs/node"}}}},"$ref":"#/$defs/node"}`, `{"next":{"next":{}}}`, true},
+		{`{"$defs":{"node":{"type":"object","properties":{"next":{"$ref":"#/$defs/node"}}}},"$ref":"#/$defs/node"}`, `{"next":5}`, false},
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

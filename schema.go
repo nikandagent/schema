@@ -2,10 +2,14 @@ package schema
 
 type (
 	Schema struct {
+		RejectUnknownKeywords bool // reject typos instead of keeping them (spec ignores unknowns)
+
 		root Opcode
 		code []Opcode
 
 		schema []byte
+
+		defs []def
 
 		tmp []Opcode
 	}
@@ -45,6 +49,7 @@ const (
 // imm
 const (
 	Pass Opcode = imm | iota
+	Err
 	Fail
 	Null
 	False
@@ -89,6 +94,7 @@ const (
 	Object
 	Properties
 	PatternProps
+	Raw
 )
 
 // ref

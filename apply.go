@@ -157,6 +157,10 @@ func (c *cur) apply(op, val Opcode) Opcode {
 		c.checkAnyOf(op, val)
 	case OneOf:
 		c.checkOneOf(op, val)
+	case Ref:
+		val = c.apply(c.s.refTarget(op), val)
+	case Raw:
+		// annotation kept for round-trip, no constraint
 	case Additional, Pattern, Default:
 		// TODO: additionalProperties (cross-keyword), pattern (regex), default (rewrite)
 	default:
@@ -309,10 +313,7 @@ func (c *cur) member(obj, key Opcode) (Opcode, bool) {
 }
 
 func (c *cur) keyEq(data, schema Opcode) bool {
-	d := c.b.src[data.off() : data.off()+data.arg()]
-	s := c.s.schema[schema.off() : schema.off()+schema.arg()]
-
-	return bytes.Equal(d, s)
+	return bytes.Equal(data.str(c.b.src), schema.str(c.s.schema))
 }
 
 func (c *cur) equalLit(val, lit Opcode) bool {
@@ -321,13 +322,13 @@ func (c *cur) equalLit(val, lit Opcode) bool {
 }
 
 func (c *cur) number(val Opcode) float64 {
-	v, _ := json2.Value(c.b.src[val.off() : val.off()+val.arg()]).Float64()
+	v, _ := json2.Value(val.str(c.b.src)).Float64()
 	return v
 }
 
 func (c *cur) schemaNum(op Opcode) float64 {
 	lit := c.s.code[op.off()]
-	v, _ := json2.Value(c.s.schema[lit.off() : lit.off()+lit.arg()]).Float64()
+	v, _ := json2.Value(lit.str(c.s.schema)).Float64()
 	return v
 }
 
@@ -383,12 +384,12 @@ func equalBuf(lb *Buffer, l Opcode, rb *Buffer, r Opcode) bool {
 	case Null, True, False:
 		return true
 	case Num:
-		lv, _ := json2.Value(lb.src[l.off() : l.off()+l.arg()]).Float64()
-		rv, _ := json2.Value(rb.src[r.off() : r.off()+r.arg()]).Float64()
+		lv, _ := json2.Value(l.str(lb.src)).Float64()
+		rv, _ := json2.Value(r.str(rb.src)).Float64()
 
 		return lv == rv
 	case Str:
-		return bytes.Equal(lb.src[l.off():l.off()+l.arg()], rb.src[r.off():r.off()+r.arg()])
+		return bytes.Equal(l.str(lb.src), r.str(rb.src))
 	case Array:
 		lo, ln := l.off(), l.arg()
 		ro, rn := r.off(), r.arg()

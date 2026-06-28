@@ -1,6 +1,10 @@
 package schema
 
-import "strconv"
+import (
+	"bytes"
+	"strconv"
+	"strings"
+)
 
 var typeNames = []struct {
 	bit  int
@@ -17,7 +21,51 @@ var typeNames = []struct {
 
 // Format reconstructs the schema document from the program in canonical form.
 func (s *Schema) Format(w []byte) []byte {
-	return s.format(w, s.root)
+	w = s.format(w, s.root)
+
+	if len(s.defs) == 0 {
+		return w
+	}
+
+	w = w[:len(w)-1] // reopen the root object, dropping its closing brace
+	if w[len(w)-1] != '{' {
+		w = append(w, ',')
+	}
+
+	w = append(w, `"$defs":{`...)
+
+	for i := range s.defs {
+		if i != 0 {
+			w = append(w, ',')
+		}
+
+		w = append(w, '"')
+		w = append(w, defName(s.defs[i].name)...)
+		w = append(w, '"', ':')
+		w = s.format(w, s.defs[i].root)
+	}
+
+	return append(w, '}', '}')
+}
+
+func defName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+
+	return p
+}
+
+// appendRef writes a ref pointer, collapsing the legacy definitions prefix.
+func appendRef(w, p []byte) []byte {
+	const legacy = "#/definitions/"
+
+	if bytes.HasPrefix(p, []byte(legacy)) {
+		w = append(w, "#/$defs/"...)
+		return append(w, p[len(legacy):]...)
+	}
+
+	return append(w, p...)
 }
 
 func (s *Schema) format(w []byte, op Opcode) []byte {
@@ -36,6 +84,13 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 
 			if i != 0 {
 				w = append(w, ',')
+			}
+
+			if c.Op() == Raw {
+				w = s.lit(w, s.code[c.off()])
+				w = append(w, ':')
+				w = s.lit(w, s.code[c.off()+1])
+				continue
 			}
 
 			w = append(w, '"')
@@ -107,8 +162,11 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case Unique:
 		return append(w, "true"...)
 	case Pattern:
-		off, n := op.off(), op.arg()
-		return append(w, s.schema[off:off+n]...)
+		return append(w, op.str(s.schema)...)
+	case Ref:
+		w = append(w, '"')
+		w = appendRef(w, op.str(s.schema))
+		return append(w, '"')
 	default:
 		panic(op)
 	}
@@ -203,6 +261,8 @@ func keywordName(op Opcode) string {
 		return "uniqueItems"
 	case Pattern:
 		return "pattern"
+	case Ref:
+		return "$ref"
 	default:
 		panic(op)
 	}

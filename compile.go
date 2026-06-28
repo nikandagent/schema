@@ -6,6 +6,11 @@ import (
 	"nikand.dev/go/json2"
 )
 
+type def struct {
+	name string // full pointer, e.g. "#/$defs/Name"
+	root Opcode
+}
+
 var ErrSchema = errors.New("bad schema")
 
 const (
@@ -33,6 +38,7 @@ func Compile(b []byte) (*Schema, error) {
 func (s *Schema) Compile(b []byte) error {
 	s.schema = b
 	s.code = s.code[:0]
+	s.defs = s.defs[:0]
 	s.tmp = s.tmp[:0]
 
 	var d json2.Iterator
@@ -49,7 +55,7 @@ func (s *Schema) Compile(b []byte) error {
 
 	s.root = root
 
-	return nil
+	return s.checkRefs()
 }
 
 func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
@@ -91,12 +97,14 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	var op Opcode
 
 	for d.ForMore(b, &i, json2.Object, &err) {
+		kst := i
+
 		key, i, err = d.Key(b, i)
 		if err != nil {
 			return 0, i, err
 		}
 
-		op, i, err = s.keyword(key, b, i)
+		op, i, err = s.keyword(key, b, kst, i)
 		if err != nil {
 			return 0, i, err
 		}
@@ -109,6 +117,9 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
+	s.canonRequired(s.tmp[mark:])
+	sortKeywords(s.tmp[mark:])
+
 	arg := len(s.tmp) - mark
 	off := len(s.code)
 	s.code = append(s.code, s.tmp[mark:]...)
@@ -116,7 +127,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	return makeNode(And, off, arg), i, nil
 }
 
-func (s *Schema) keyword(name, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 	switch string(name) {
 	case "type":
 		return s.kwType(b, st)
@@ -168,8 +179,12 @@ func (s *Schema) keyword(name, b []byte, st int) (Opcode, int, error) {
 		return s.kwUnique(b, st)
 	case "pattern":
 		return s.kwPattern(b, st)
+	case "$ref":
+		return s.kwRef(b, st)
+	case "$defs", "definitions":
+		return s.kwDefs(name, b, st)
 	default:
-		return s.kwUnknown(name, b, st)
+		return s.kwUnknown(name, b, kst, st)
 	}
 }
 
@@ -397,22 +412,120 @@ func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
 	return makeNode(Pattern, i, j-i), j, nil
 }
 
-// kwUnknown handles keywords outside the compiled set: annotations, deferred
-// refs and x- extensions are consumed and ignored; anything else is rejected.
-func (s *Schema) kwUnknown(name, b []byte, st int) (Opcode, int, error) {
-	if !extraKeyword(name) {
+func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
+	var d json2.Iterator
+
+	tp, i, err := d.Type(b, st)
+	if err != nil {
+		return 0, i, err
+	}
+
+	if tp != json2.String {
+		return 0, i, ErrSchema
+	}
+
+	j, err := d.Skip(b, i)
+	if err != nil {
+		return 0, j, err
+	}
+
+	// pragmatic: only internal pointers, no external refs or ~0/~1 unescaping
+	// (the latest spec resolves full URI references).
+	off, n := i+1, j-i-2 // strip the quotes
+	if n < 1 || b[off] != '#' {
+		return 0, i, ErrSchema
+	}
+
+	return makeNode(Ref, off, n), j, nil
+}
+
+func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
+	var d json2.Iterator
+
+	i, err := d.Enter(b, st, json2.Object)
+	if err != nil {
+		return 0, i, err
+	}
+
+	prefix := "#/" + string(name) + "/"
+
+	var key []byte
+	var sub Opcode
+
+	for d.ForMore(b, &i, json2.Object, &err) {
+		key, i, err = d.Key(b, i)
+		if err != nil {
+			return 0, i, err
+		}
+
+		sub, i, err = s.compile(b, i)
+		if err != nil {
+			return 0, i, err
+		}
+
+		s.defs = append(s.defs, def{prefix + string(key), sub})
+	}
+	if err != nil {
+		return 0, i, err
+	}
+
+	return Pass, i, nil
+}
+
+// kwUnknown keeps keywords outside the compiled set as a Raw node so Format can
+// emit them back: annotations and known-but-unsupported keywords always, typos
+// only unless RejectUnknownKeywords is set (the spec ignores unknowns).
+func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
+	if !knownKeyword(name) && s.RejectUnknownKeywords {
 		return 0, st, ErrSchema
 	}
 
 	var d json2.Iterator
 
-	i, err := d.Skip(b, st)
+	kend, err := d.Skip(b, kst)
+	if err != nil {
+		return 0, kend, err
+	}
+
+	key := makeNode(Str, kst, kend-kst)
+
+	val, i, err := s.literal(b, st)
 	if err != nil {
 		return 0, i, err
 	}
 
-	// TODO: preserve x- extensions (emit a custom node) instead of dropping them
-	return Pass, i, nil
+	off := len(s.code)
+	s.code = append(s.code, key, val)
+
+	return makeNode(Raw, off, 2), i, nil
+}
+
+func (s *Schema) checkRefs() error {
+	for _, op := range s.code {
+		if op.Op() == Ref && s.refTarget(op) == Err {
+			return ErrSchema
+		}
+	}
+
+	return nil
+}
+
+// refTarget resolves a Ref against the flat global defs table. The latest
+// spec's $ref scoping and nested $defs base resolution are not modeled.
+func (s *Schema) refTarget(op Opcode) Opcode {
+	name := op.str(s.schema)
+
+	if string(name) == "#" {
+		return s.root
+	}
+
+	for i := range s.defs {
+		if s.defs[i].name == string(name) {
+			return s.defs[i].root
+		}
+	}
+
+	return Err
 }
 
 // literal decodes a JSON value into the program arena, reusing the data
@@ -449,12 +562,94 @@ func typeBit(name []byte) int {
 	}
 }
 
-func extraKeyword(name []byte) bool {
+// knownKeyword reports recognized JSON Schema keywords we don't compile:
+// annotations/meta and known-but-unsupported applicators. They are kept as Raw
+// rather than treated as typos.
+func knownKeyword(name []byte) bool {
 	switch string(name) {
-	case "$schema", "$id", "$anchor", "$comment", "title", "description", "examples",
-		"$defs", "definitions", "$ref":
+	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
+		"title", "description", "examples", "readOnly", "writeOnly", "deprecated":
+		return true
+	case "if", "then", "else", "contains", "minContains", "maxContains",
+		"patternProperties", "propertyNames", "prefixItems",
+		"dependentSchemas", "dependentRequired", "dependencies",
+		"unevaluatedItems", "unevaluatedProperties":
+		return true
+	case "format", "contentEncoding", "contentMediaType", "contentSchema":
+		return true
+	case "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor":
 		return true
 	}
 
 	return len(name) >= 2 && name[0] == 'x' && name[1] == '-'
+}
+
+// canonical keyword order; unlisted opcodes (Raw annotations) sort last, keeping
+// their relative order through the stable insertion sort.
+var keywordOrder = []Opcode{
+	Ref,
+	Type, Enum, Const,
+	Minimum, Maximum, ExclMin, ExclMax, MultipleOf,
+	MinLen, MaxLen, Pattern,
+	MinItems, MaxItems, Unique, Items,
+	MinProps, MaxProps, Properties, Required, Additional,
+	Not, AllOf, AnyOf, OneOf,
+	Default,
+}
+
+// canonRequired reorders required names to follow their order in properties;
+// names absent from properties keep their relative position at the end.
+func (s *Schema) canonRequired(and []Opcode) {
+	var props, req Opcode
+
+	for _, op := range and {
+		switch op.Op() {
+		case Properties:
+			props = op
+		case Required:
+			req = op
+		}
+	}
+
+	if props.Op() != Properties || req.Op() != Required {
+		return
+	}
+
+	names := req.nodes(s.code)
+
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && s.propIndex(props, names[j]) < s.propIndex(props, names[j-1]); j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+}
+
+func (s *Schema) propIndex(props, name Opcode) int {
+	off, n := props.off(), props.arg()
+
+	for i := range n {
+		if string(s.code[off+2*i].str(s.schema)) == string(name.str(s.schema)) {
+			return i
+		}
+	}
+
+	return n
+}
+
+func sortKeywords(and []Opcode) {
+	for i := 1; i < len(and); i++ {
+		for j := i; j > 0 && keywordRank(and[j]) < keywordRank(and[j-1]); j-- {
+			and[j], and[j-1] = and[j-1], and[j]
+		}
+	}
+}
+
+func keywordRank(op Opcode) int {
+	for i, k := range keywordOrder {
+		if k == op.Op() {
+			return i
+		}
+	}
+
+	return len(keywordOrder)
 }
