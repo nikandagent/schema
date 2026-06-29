@@ -245,7 +245,23 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 			return val, err
 		}
 	case Ref:
-		return c.apply(c.s.refTarget(op), val)
+		// An external ref lives in another document's program arena; swap it in for
+		// the subtree (the data arena c.b stays put), then restore.
+		ts, tnode, err := c.s.refResolve(op)
+		if err != nil {
+			return val, err
+		}
+
+		if ts == c.s {
+			return c.apply(tnode, val)
+		}
+
+		saved := c.s
+		c.s = ts
+		v, err := c.apply(tnode, val)
+		c.s = saved
+
+		return v, err
 	case CallExt:
 		return c.s.xhooks[op.Arg()].h(c, c.s.prog.code[op.Off()], val)
 	case Additional:
@@ -256,9 +272,10 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		if val.Op() == Str && !c.s.patterns[op].Match(c.b.String(val)) {
 			c.Fail(op, val, "does not match pattern")
 		}
-	case Raw, Default:
+	case Raw, Default, Defs:
 		// Raw is kept only for round-trip; Default is consumed by the enclosing
-		// Properties (insertion). Neither constrains a value at its own node.
+		// Properties (insertion); Defs only holds definitions reached via $ref.
+		// None constrains a value at its own node.
 	default:
 		panic(op)
 	}

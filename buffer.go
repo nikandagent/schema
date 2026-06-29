@@ -296,8 +296,10 @@ func (b *Buffer) Span(op Opcode) []byte {
 
 func (b *Buffer) Nodes(op Opcode) []Opcode {
 	off, n := op.Off(), op.Arg()
-	if op.Op() == Object || op.Op() == Properties {
-		n *= 2
+
+	switch op.Op() {
+	case Object, Properties, PatternProps, Defs:
+		n *= 2 // pair-blocks: key/pattern + subschema per entry
 	}
 
 	return b.code[off : off+n]

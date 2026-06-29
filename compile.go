@@ -74,12 +74,62 @@ func (s *Schema) Compile(schema []byte) error {
 
 	s.root = root
 	s.prog.ro = true
+	s.rootID()
+	s.register()
 
 	if err := s.checkRefs(); err != nil {
 		return err
 	}
 
 	return s.checkPatterns()
+}
+
+// AddDoc registers doc under uri so an external $ref to that document resolves to
+// it. The registry is shared into doc, so documents can refer to each other.
+// Register before Compile of any document that refs uri.
+func (s *Schema) AddDoc(uri string, doc *Schema) {
+	if s.docs == nil {
+		s.docs = map[string]*Schema{}
+	}
+
+	doc.id = uri
+	doc.docs = s.docs
+	s.docs[uri] = doc
+}
+
+// register puts this document into the shared registry under its own id, so
+// other documents (including lazily loaded ones) can resolve back to it. The
+// registry is created on demand once a Resolve hook is present.
+func (s *Schema) register() {
+	if s.docs == nil {
+		if s.Resolve == nil {
+			return
+		}
+
+		s.docs = map[string]*Schema{}
+	}
+
+	if s.id != "" {
+		s.docs[s.id] = s
+	}
+}
+
+// rootID reads the document's own base URI from a top-level $id, kept as a Raw.
+func (s *Schema) rootID() {
+	if s.root.Op() != And {
+		return
+	}
+
+	for _, ch := range s.prog.Nodes(s.root) {
+		if ch.Op() != Raw {
+			continue
+		}
+
+		if string(s.prog.String(s.prog.code[ch.Off()])) == "$id" {
+			s.id = string(s.prog.String(s.prog.code[ch.Off()+1]))
+			return
+		}
+	}
 }
 
 // SetXHook binds h to the custom keyword "x-"+name. When Compile meets that
@@ -132,7 +182,8 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	}
 
 	var key []byte
-	var op Opcode
+	var op, anchor Opcode
+	var hasAnchor bool
 
 	for d.ForMore(b, &i, json2.Object, &err) {
 		kst := i
@@ -150,10 +201,16 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 		if op != Pass {
 			s.prog.tmp = append(s.prog.tmp, op)
 		}
+
+		if string(key) == "$anchor" {
+			anchor, hasAnchor = op, true // op is the Raw{key,val}; val is the anchor name
+		}
 	}
 	if err != nil {
 		return 0, i, err
 	}
+
+	s.mergeDefs(mark)
 
 	if !s.Flags.Is(SchemaKeepOrder) {
 		s.canonRequired(s.prog.tmp[mark:])
@@ -166,7 +223,14 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
-	return makeNode(And, off, n), i, nil
+	node := makeNode(And, off, n)
+
+	if hasAnchor {
+		name := string(s.prog.String(s.prog.code[anchor.Off()+1]))
+		s.defs = append(s.defs, def{"#" + name, node})
+	}
+
+	return node, i, nil
 }
 
 func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
@@ -516,10 +580,9 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 		return 0, j, err
 	}
 
-	// pragmatic: only internal pointers, no external refs or ~0/~1 unescaping
-	// (the latest spec resolves full URI references).
+	// any URI-reference: "#..." internal, "doc#frag" external (resolved via docs).
 	off, n := i+1, j-i-2 // strip the quotes
-	if n < 1 || b[off] != '#' {
+	if n < 1 {
 		return 0, i, ErrSchema
 	}
 
@@ -540,7 +603,13 @@ func pointerEscape(s string) string {
 	return s
 }
 
+// kwDefs compiles $defs/definitions into a Defs pair-block (raw key + subschema)
+// that Format round-trips, and registers each entry in the resolution table
+// s.defs under its canonical pointer name for $ref lookup.
 func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
+
 	var d json2.Iterator
 
 	i, err := d.Enter(b, st, json2.Object)
@@ -550,11 +619,10 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 	prefix := "#/" + string(name) + "/"
 
-	var key []byte
-	var sub Opcode
+	var key, sub Opcode
 
 	for d.ForMore(b, &i, json2.Object, &err) {
-		key, i, err = d.Key(b, i)
+		key, i, err = s.literal(b, i)
 		if err != nil {
 			return 0, i, err
 		}
@@ -564,13 +632,18 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		s.defs = append(s.defs, def{prefix + pointerEscape(string(key)), sub})
+		s.prog.tmp = append(s.prog.tmp, key, sub)
+		s.defs = append(s.defs, def{prefix + pointerEscape(string(s.prog.String(key))), sub})
 	}
 	if err != nil {
 		return 0, i, err
 	}
 
-	return Pass, i, nil
+	n := (len(s.prog.tmp) - mark) / 2
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
+
+	return makeNode(Defs, off, n), i, nil
 }
 
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
@@ -628,9 +701,34 @@ func (s *Schema) hookXIndex(name []byte) (int, bool) {
 	return 0, false
 }
 
+// checkRefs validates refs without any I/O: internal pointers must resolve now,
+// external refs to a registered document are checked now, and external refs left
+// to the Resolve hook are deferred to apply (error here only if neither applies).
 func (s *Schema) checkRefs() error {
 	for _, op := range s.prog.code {
-		if op.Op() == Ref && s.refTarget(op) == bad {
+		if op.Op() != Ref {
+			continue
+		}
+
+		doc, frag := splitRef(string(s.prog.Span(op)))
+
+		if doc == "" {
+			if s.fragTarget(frag) == bad {
+				return ErrSchema
+			}
+
+			continue
+		}
+
+		if t := s.docs[doc]; t != nil {
+			if t.fragTarget(frag) == bad {
+				return ErrSchema
+			}
+
+			continue
+		}
+
+		if s.Resolve == nil {
 			return ErrSchema
 		}
 	}
@@ -668,15 +766,77 @@ func (s *Schema) checkPatterns() error {
 	return nil
 }
 
-func (s *Schema) refTarget(op Opcode) Opcode {
-	name := s.prog.Span(op)
+// refResolve resolves a $ref to its document and node: the same schema for an
+// internal "#frag", another document for "doc#frag". The doc part is an opaque
+// handle matched against the registry, then loaded via Resolve on a miss.
+func (s *Schema) refResolve(op Opcode) (*Schema, Opcode, error) {
+	doc, frag := splitRef(string(s.prog.Span(op)))
 
-	if string(name) == "#" {
+	t := s
+
+	if doc != "" {
+		var err error
+
+		t, err = s.loadDoc(doc)
+		if err != nil {
+			return s, bad, err
+		}
+	}
+
+	tnode := t.fragTarget(frag)
+	if tnode == bad {
+		return s, bad, ErrSchema
+	}
+
+	return t, tnode, nil
+}
+
+// loadDoc returns the document for an opaque handle: from the registry, or via
+// the Resolve hook (compiled and cached under the handle). The registry and hook
+// are shared into the loaded doc so it can resolve its own external refs.
+func (s *Schema) loadDoc(handle string) (*Schema, error) {
+	if t := s.docs[handle]; t != nil {
+		return t, nil
+	}
+
+	if s.Resolve == nil {
+		return nil, ErrSchema
+	}
+
+	body, err := s.Resolve(s.id, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	t := &Schema{docs: s.docs, Resolve: s.Resolve}
+
+	if err := t.Compile(body); err != nil {
+		return nil, err
+	}
+
+	s.docs[handle] = t
+
+	return t, nil
+}
+
+// splitRef cuts a ref at '#' into (document, fragment); fragment keeps the '#'.
+func splitRef(ref string) (doc, frag string) {
+	if i := strings.IndexByte(ref, '#'); i >= 0 {
+		return ref[:i], ref[i:]
+	}
+
+	return ref, ""
+}
+
+// fragTarget resolves a fragment within this document: "" or "#" is the root,
+// "#/$defs/x" and "#anchor" are entries in the defs table.
+func (s *Schema) fragTarget(frag string) Opcode {
+	if frag == "" || frag == "#" {
 		return s.root
 	}
 
 	for i := range s.defs {
-		if s.defs[i].name == string(name) {
+		if s.defs[i].name == frag {
 			return s.defs[i].root
 		}
 	}
@@ -744,6 +904,37 @@ var keywordOrder = []Opcode{
 	MinProps, MaxProps, Properties, Required, PatternProps, Additional,
 	Not, AllOf, AnyOf, OneOf,
 	Default,
+	Defs,
+}
+
+// mergeDefs folds several $defs/definitions blocks in one object into a single
+// Defs node, so Format emits one "$defs" member with unique JSON keys.
+func (s *Schema) mergeDefs(mark int) {
+	tmp := s.prog.tmp
+	first := -1
+
+	for i := mark; i < len(tmp); i++ {
+		if tmp[i].Op() != Defs {
+			continue
+		}
+
+		if first < 0 {
+			first = i
+			continue
+		}
+
+		a, b := tmp[first], tmp[i]
+		off := len(s.prog.code)
+		s.prog.code = append(s.prog.code, s.prog.Nodes(a)...)
+		s.prog.code = append(s.prog.code, s.prog.Nodes(b)...)
+		tmp[first] = makeNode(Defs, off, a.Arg()+b.Arg())
+
+		copy(tmp[i:], tmp[i+1:])
+		tmp = tmp[:len(tmp)-1]
+		i--
+	}
+
+	s.prog.tmp = tmp
 }
 
 // linkAdditional gives an additionalProperties node references to its sibling

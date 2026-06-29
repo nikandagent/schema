@@ -12,6 +12,14 @@ type (
 		defs   []def
 		xhooks []hook // name -> "x-name" hook, bound at compile (SetXHook)
 
+		id   string             // this document's base URI ($id or registration key)
+		docs map[string]*Schema // shared registry: base URI -> compiled document
+
+		// Resolve loads a document not already registered, on first $ref to it.
+		// base is the referrer's $id, ref the opaque handle (left of '#'). The
+		// caller owns all path/version/transport logic.
+		Resolve func(base, ref string) ([]byte, error)
+
 		patterns map[Opcode]*regexp.Regexp // pattern node -> compiled regex, filled at compile
 
 		b Buffer // reused data arena for Validate/Rewrite
@@ -116,6 +124,7 @@ const (
 	Object
 	Properties
 	PatternProps
+	Defs
 	Raw
 )
 

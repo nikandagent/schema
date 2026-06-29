@@ -3,7 +3,6 @@ package schema
 import (
 	"bytes"
 	"strconv"
-	"strings"
 )
 
 var typeNames = []struct {
@@ -20,52 +19,10 @@ var typeNames = []struct {
 }
 
 // Format reconstructs the schema document from the program in canonical form.
+// $defs round-trips from its Defs node in the tree; the s.defs table is only a
+// $ref resolution index and is never emitted from here.
 func (s *Schema) Format(w []byte) []byte {
-	w = s.format(w, s.root)
-
-	if len(s.defs) == 0 {
-		return w
-	}
-
-	w = w[:len(w)-1] // reopen the root object, dropping its closing brace
-	if w[len(w)-1] != '{' {
-		w = append(w, ',')
-	}
-
-	w = append(w, `"$defs":{`...)
-
-	for i := range s.defs {
-		if i != 0 {
-			w = append(w, ',')
-		}
-
-		w = append(w, '"')
-		w = append(w, defName(s.defs[i].name)...)
-		w = append(w, '"', ':')
-		w = s.format(w, s.defs[i].root)
-	}
-
-	return append(w, '}', '}')
-}
-
-func defName(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		p = p[i+1:]
-	}
-
-	return pointerUnescape(p)
-}
-
-// pointerUnescape reverses pointerEscape: "~1"->'/', "~0"->'~' (order matters).
-func pointerUnescape(s string) string {
-	if !strings.Contains(s, "~") {
-		return s
-	}
-
-	s = strings.ReplaceAll(s, "~1", "/")
-	s = strings.ReplaceAll(s, "~0", "~")
-
-	return s
+	return s.format(w, s.root)
 }
 
 // appendRef writes a ref pointer, collapsing the legacy definitions prefix.
@@ -129,7 +86,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Type:
 		return s.formatType(w, op.Imm())
-	case Properties:
+	case Properties, Defs:
 		off, n := op.Off(), op.Arg()
 
 		w = append(w, '{')
@@ -254,6 +211,8 @@ func keywordName(op Opcode) string {
 		return "type"
 	case Properties:
 		return "properties"
+	case Defs:
+		return "$defs"
 	case PatternProps:
 		return "patternProperties"
 	case Required:
