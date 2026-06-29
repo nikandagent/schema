@@ -93,6 +93,14 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 				continue
 			}
 
+			if c.Op() == CallExt {
+				w = append(w, `"x-`...)
+				w = append(w, s.xhooks[c.Arg()].name...)
+				w = append(w, '"', ':')
+				w = s.lit(w, s.prog.code[c.Off()])
+				continue
+			}
+
 			w = append(w, '"')
 			w = append(w, keywordName(c.Op())...)
 			w = append(w, '"', ':')
@@ -175,7 +183,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 // lit renders a value literal, reusing the data encoder over the program arena.
 func (s *Schema) lit(w []byte, val Opcode) []byte {
 	bf := Buffer{code: s.prog.code, src: s.prog.src}
-	return bf.encode(w, val)
+	return bf.AppendJSON(w, val)
 }
 
 func (s *Schema) formatType(w []byte, mask int) []byte {

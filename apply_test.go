@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 )
@@ -57,10 +58,14 @@ func TestValidate(tb *testing.T) {
 		{`{"allOf":[{"type":"integer"},{"minimum":5}]}`, `7`, true},
 		{`{"allOf":[{"type":"integer"},{"minimum":5}]}`, `3`, false},
 
-		{`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
-			`{"items":[{"id":1},{"id":2}]}`, true},
-		{`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
-			`{"items":[{"id":1},{"name":"x"}]}`, false},
+		{
+			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
+			`{"items":[{"id":1},{"id":2}]}`, true,
+		},
+		{
+			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
+			`{"items":[{"id":1},{"name":"x"}]}`, false,
+		},
 
 		{`{"title":"x","type":"string"}`, `"y"`, true}, // annotation ignored
 
@@ -362,6 +367,171 @@ func TestWalkSchemaBuf(tb *testing.T) {
 
 	if !saw {
 		tb.Errorf("handler never saw a Properties op")
+	}
+}
+
+func TestXHook(tb *testing.T) {
+	var rewriting bool
+
+	upper := func(c Applier, op, val Opcode) (Opcode, error) {
+		rewriting = c.Rewriting()
+
+		if c.Rewriting() && string(c.SchemaBuf().Span(op)) == `"upper"` && val.Op() == Str {
+			return c.Buf().EmitSpan(Str, bytes.ToUpper(c.Buf().Span(val))), nil
+		}
+
+		return val, nil
+	}
+
+	// 1. end-to-end rewrite via the hook.
+	var s Schema
+	s.SetXHook("type", upper)
+
+	if err := s.Compile([]byte(`{"properties":{"name":{"x-type":"upper"}}}`)); err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	out, _, err := s.Rewrite(nil, []byte(`{"name":"hi"}`))
+	if err != nil {
+		tb.Fatalf("rewrite: %v", err)
+	}
+
+	if got := string(out); got != `{"name":"HI"}` {
+		tb.Errorf("rewrite: got %q, want %q", got, `{"name":"HI"}`)
+	}
+
+	// 2. the x- keyword survives compile -> format via CallExt.
+	if got := string(s.Format(nil)); got != `{"properties":{"name":{"x-type":"upper"}}}` {
+		tb.Errorf("format: got %q", got)
+	}
+
+	// 3. read-only: Validate is clean and the handler observes Rewriting()==false.
+	rewriting = true
+
+	if d, err := s.Validate([]byte(`{"name":"hi"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate: err=%v diag=%v", err, d)
+	}
+
+	if rewriting {
+		tb.Errorf("validate: handler saw Rewriting()==true")
+	}
+}
+
+func TestXHookUnregistered(tb *testing.T) {
+	// An x- keyword with no hook stays Raw: compiles and round-trips, no dispatch.
+	var s Schema
+
+	if err := s.Compile([]byte(`{"x-foo":{"a":[1,2]},"type":"object"}`)); err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	if got := string(s.Format(nil)); got != `{"type":"object","x-foo":{"a":[1,2]}}` {
+		tb.Errorf("format: got %q", got)
+	}
+
+	if d, err := s.Validate([]byte(`{}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate: err=%v diag=%v", err, d)
+	}
+}
+
+func TestWalkFromJSON(tb *testing.T) {
+	// A handler mints a whole structured value from JSON text via FromJSON.
+	s, err := Compile([]byte(`{}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	h := func(c Applier, op, val Opcode) (Opcode, error) {
+		if val.Op() == Num {
+			return c.Buf().FromJSON([]byte(`{"wrapped":5}`))
+		}
+
+		return c.Apply(op, val)
+	}
+
+	out, _, err := s.WalkRewrite(nil, []byte(`5`), h)
+	if err != nil {
+		tb.Fatalf("walkrewrite: %v", err)
+	}
+
+	if got := string(out); got != `{"wrapped":5}` {
+		tb.Errorf("walkrewrite: got %q, want %q", got, `{"wrapped":5}`)
+	}
+}
+
+func TestWalkEmitArray(tb *testing.T) {
+	// Array-element rewrite propagates: the engine descends via items and rebuilds
+	// the array from the subschema's returned values.
+	s, err := Compile([]byte(`{"items":{}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	repl := func(c Applier, op, val Opcode) (Opcode, error) {
+		if val.Op() == Num {
+			return c.Buf().EmitSpan(Num, []byte("42")), nil
+		}
+
+		return c.Apply(op, val)
+	}
+
+	out, _, err := s.WalkRewrite(nil, []byte(`[1,2,3]`), repl)
+	if err != nil {
+		tb.Fatalf("walkrewrite: %v", err)
+	}
+
+	if got := string(out); got != `[42,42,42]` {
+		tb.Errorf("walkrewrite: got %q, want %q", got, `[42,42,42]`)
+	}
+
+	// structural sharing: a pure delegate leaves the input byte-identical.
+	pass := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+
+	out, _, err = s.WalkRewrite(nil, []byte(`[1,2,3]`), pass)
+	if err != nil {
+		tb.Fatalf("walkrewrite delegate: %v", err)
+	}
+
+	if got := string(out); got != `[1,2,3]` {
+		tb.Errorf("walkrewrite delegate: got %q, want %q", got, `[1,2,3]`)
+	}
+}
+
+func TestWalkEmit(tb *testing.T) {
+	// A handler produces values via Emit, replacing matched scalars through
+	// WalkRewrite; non-matching values fall through to the default.
+	for _, tc := range []struct {
+		schema, in, out string
+		emit            Opcode
+		bytes           string
+	}{
+		{`{}`, `5`, `42`, Num, `42`},
+		{`{}`, `"a"`, `"hi"`, Str, `"hi"`},
+		{`{"properties":{"a":{}}}`, `{"a":5,"b":7}`, `{"a":42,"b":7}`, Num, `42`}, // only governed scalar replaced
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		h := func(c Applier, op, val Opcode) (Opcode, error) {
+			if val.Op() == tc.emit {
+				return c.Buf().EmitSpan(tc.emit, []byte(tc.bytes)), nil
+			}
+
+			return c.Apply(op, val)
+		}
+
+		out, _, err := s.WalkRewrite(nil, []byte(tc.in), h)
+		if err != nil {
+			tb.Errorf("walkrewrite %s: %v", tc.in, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("walkrewrite %s: got %q, want %q", tc.in, got, tc.out)
+		}
 	}
 }
 

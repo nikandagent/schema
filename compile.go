@@ -6,10 +6,17 @@ import (
 	"nikand.dev/go/json2"
 )
 
-type def struct {
-	name string // full pointer, e.g. "#/$defs/Name"
-	root Opcode
-}
+type (
+	def struct {
+		name string // full pointer, e.g. "#/$defs/Name"
+		root Opcode
+	}
+
+	hook struct {
+		name string // keyword suffix after "x-", e.g. "type"
+		h    Handler
+	}
+)
 
 var ErrSchema = errors.New("bad schema")
 
@@ -35,27 +42,51 @@ func Compile(b []byte) (*Schema, error) {
 	return &s, nil
 }
 
-func (s *Schema) Compile(b []byte) error {
-	s.prog.src = b
-	s.prog.code = s.prog.code[:0]
+func (s *Schema) Compile(schema []byte) error {
+	b := &s.prog
+
+	b.ro = false // writable while compiling, read-only after
+	b.src = schema
+	b.code = b.code[:0]
+	b.text = b.text[:0]
+	b.tmp = b.tmp[:0]
+
 	s.defs = s.defs[:0]
-	s.prog.tmp = s.prog.tmp[:0]
+
+	if b.text == nil {
+		b.text = b.textbuf[:]
+	}
 
 	var d json2.Iterator
 
-	root, i, err := s.compile(b, 0)
+	root, i, err := s.compile(schema, 0)
 	if err != nil {
 		return err
 	}
 
-	i = d.SkipSpaces(b, i)
-	if i != len(b) {
+	i = d.SkipSpaces(schema, i)
+	if i != len(schema) {
 		return ErrSchema
 	}
 
 	s.root = root
+	s.prog.ro = true
 
 	return s.checkRefs()
+}
+
+// SetXHook binds h to the custom keyword "x-"+name. When Compile meets that
+// keyword it compiles to a CallExt dispatching to h during Walk/Rewrite, instead
+// of keeping it as an inert Raw annotation. Register before Compile.
+func (s *Schema) SetXHook(name string, h Handler) {
+	for i := range s.xhooks {
+		if s.xhooks[i].name == name {
+			s.xhooks[i].h = h
+			return
+		}
+	}
+
+	s.xhooks = append(s.xhooks, hook{name: name, h: h})
 }
 
 func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
@@ -186,6 +217,10 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 	case "$defs", "definitions":
 		return s.kwDefs(name, b, st)
 	default:
+		if i, ok := s.hookXIndex(name); ok {
+			return s.kwHook(i, b, st)
+		}
+
 		return s.kwUnknown(name, b, kst, st)
 	}
 }
@@ -474,9 +509,6 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 	return Pass, i, nil
 }
 
-// kwUnknown keeps keywords outside the compiled set as a Raw node so Format can
-// emit them back: annotations and known-but-unsupported keywords always, typos
-// only unless SchemaRejectUnknown is set (the spec ignores unknowns).
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	if !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown) {
 		return 0, st, ErrSchema
@@ -502,6 +534,36 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	return makeNode(Raw, off, 2), i, nil
 }
 
+// kwHook compiles a hooked keyword to a CallExt: off → its value operand in the
+// program arena, arg → the hook index dispatched to at apply time.
+func (s *Schema) kwHook(i int, b []byte, st int) (Opcode, int, error) {
+	val, j, err := s.literal(b, st)
+	if err != nil {
+		return 0, j, err
+	}
+
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, val)
+
+	return makeNode(CallExt, off, i), j, nil
+}
+
+func (s *Schema) hookXIndex(name []byte) (int, bool) {
+	if len(name) < 3 || name[0] != 'x' || name[1] != '-' {
+		return 0, false
+	}
+
+	name = name[2:]
+
+	for i := range s.xhooks {
+		if s.xhooks[i].name == string(name) {
+			return i, true
+		}
+	}
+
+	return 0, false
+}
+
 func (s *Schema) checkRefs() error {
 	for _, op := range s.prog.code {
 		if op.Op() == Ref && s.refTarget(op) == bad {
@@ -512,8 +574,6 @@ func (s *Schema) checkRefs() error {
 	return nil
 }
 
-// refTarget resolves a Ref against the flat global defs table. The latest
-// spec's $ref scoping and nested $defs base resolution are not modeled.
 func (s *Schema) refTarget(op Opcode) Opcode {
 	name := s.prog.Span(op)
 
@@ -530,12 +590,10 @@ func (s *Schema) refTarget(op Opcode) Opcode {
 	return bad
 }
 
-// literal decodes a JSON value into the program arena, reusing the data
-// decoder. Spans point into the schema source.
 func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {
 	bf := Buffer{code: s.prog.code, src: b, tmp: s.prog.tmp}
 
-	val, i, err := bf.value(b, st)
+	val, i, err := bf.value(b, st, false)
 
 	s.prog.code = bf.code
 	s.prog.tmp = bf.tmp
@@ -564,9 +622,6 @@ func typeBit(name []byte) int {
 	}
 }
 
-// knownKeyword reports recognized JSON Schema keywords we don't compile:
-// annotations/meta and known-but-unsupported applicators. They are kept as Raw
-// rather than treated as typos.
 func knownKeyword(name []byte) bool {
 	switch string(name) {
 	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
@@ -586,8 +641,6 @@ func knownKeyword(name []byte) bool {
 	return len(name) >= 2 && name[0] == 'x' && name[1] == '-'
 }
 
-// canonical keyword order; unlisted opcodes (Raw annotations) sort last, keeping
-// their relative order through the stable insertion sort.
 var keywordOrder = []Opcode{
 	Ref,
 	Type, Enum, Const,
@@ -599,8 +652,6 @@ var keywordOrder = []Opcode{
 	Default,
 }
 
-// canonRequired reorders required names to follow their order in properties;
-// names absent from properties keep their relative position at the end.
 func (s *Schema) canonRequired(and []Opcode) {
 	var props, req Opcode
 

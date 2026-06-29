@@ -7,7 +7,8 @@ type (
 		root Opcode
 		prog Buffer // compiled program: code nodes + schema bytes (src) + compile scratch (tmp)
 
-		defs []def
+		defs   []def
+		xhooks []hook // name -> "x-name" hook, bound at compile (SetXHook)
 
 		b Buffer // reused data arena for Validate/Rewrite
 	}

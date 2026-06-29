@@ -32,6 +32,7 @@ type (
 		Fail(op, val Opcode, msg string)
 		Buf() *Buffer       // data arena (the value side)
 		SchemaBuf() *Buffer // program arena (the op side)
+		Rewriting() bool    // false under Validate/Walk (returned value ignored)
 	}
 
 	Diag struct {
@@ -103,7 +104,7 @@ func (s *Schema) WalkRewrite(w, r []byte, h Handler) ([]byte, []Diag, error) {
 		return w, c.diag, e
 	}
 
-	return c.b.encode(w, out), c.diag, nil
+	return c.b.AppendJSON(w, out), c.diag, nil
 }
 
 // Two arenas, walked in parallel but never interlinked — each node's spans
@@ -136,10 +137,8 @@ func (c *cur) Apply(op, val Opcode) (Opcode, error) {
 
 func (c *cur) Buf() *Buffer       { return c.b }
 func (c *cur) SchemaBuf() *Buffer { return &c.s.prog }
+func (c *cur) Rewriting() bool    { return c.rewrite }
 
-// applyDefault runs program node op against data value val and returns the
-// (possibly rewritten) value. Validation issues are collected in c.diag; a
-// non-nil error is a hard stop raised by a handler.
 func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	// Type-specific keywords are guarded on the value's type: per spec a keyword
 	// that doesn't apply to the instance type imposes no constraint (it passes).
@@ -174,9 +173,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 			c.Fail(op, val, "too many properties")
 		}
 	case Items:
-		if err := c.checkItems(op, val); err != nil {
-			return val, err
-		}
+		return c.checkItems(op, val)
 	case MinItems:
 		if val.Op() == Array && val.Arg() < op.Imm() {
 			c.Fail(op, val, "too few items")
@@ -249,6 +246,8 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		}
 	case Ref:
 		return c.apply(c.s.refTarget(op), val)
+	case CallExt:
+		return c.s.xhooks[op.Arg()].h(c, c.s.prog.code[op.Off()], val)
 	case Raw:
 		// annotation kept for round-trip, no constraint
 	case Additional, Pattern, Default:
@@ -303,8 +302,6 @@ func (c *cur) validateProps(op, val Opcode) error {
 	return nil
 }
 
-// rewriteProps rebuilds the object with rewritten members and inserted defaults,
-// returning val unchanged when nothing moved (structural sharing).
 func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
 	mark := len(c.b.tmp)
 	defer func() { c.b.tmp = c.b.tmp[:mark] }()
@@ -326,17 +323,9 @@ func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
 		return val, nil
 	}
 
-	out := c.b.tmp[mark:]
-	n := len(out) / 2
-	off := len(c.b.code)
-	c.b.code = append(c.b.code, out...)
-
-	return makeNode(Object, off, n), nil
+	return c.b.Object(c.b.tmp[mark:]...), nil
 }
 
-// orderedProps keeps the input key order, rewriting governed members in place
-// and appending defaults for missing keys at the end. It reports whether
-// anything changed.
 func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 	dirty := false
 
@@ -375,7 +364,7 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 		}
 
 		if dv, ok := c.defaultOf(c.s.prog.code[off+2*i+1]); ok {
-			c.b.tmp = append(c.b.tmp, c.copyLit(key), c.copyLit(dv))
+			c.b.tmp = append(c.b.tmp, c.b.CopyFrom(&c.s.prog, key), c.b.CopyFrom(&c.s.prog, dv))
 			dirty = true
 		}
 	}
@@ -383,10 +372,6 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 	return dirty, nil
 }
 
-// canonProps emits governed keys in declared properties order, inserting
-// defaults into their natural slots, then the remaining keys in input order. It
-// reports dirty when an emitted pair lands in a different slot than the source
-// (reorder or rewritten value) or a default was inserted.
 func (c *cur) canonProps(op, val Opcode) (bool, error) {
 	voff, vn := val.Off(), val.Arg()
 
@@ -421,7 +406,7 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 		}
 
 		if dv, ok := c.defaultOf(sub); ok {
-			c.b.tmp = append(c.b.tmp, c.copyLit(key), c.copyLit(dv))
+			c.b.tmp = append(c.b.tmp, c.b.CopyFrom(&c.s.prog, key), c.b.CopyFrom(&c.s.prog, dv))
 			dirty = true
 		}
 	}
@@ -471,51 +456,6 @@ func (c *cur) defaultOf(sub Opcode) (Opcode, bool) {
 	return 0, false
 }
 
-// copyLit copies a schema literal into the data arena: scalar bytes into the
-// writable text tail, container structure into the node arena.
-func (c *cur) copyLit(lit Opcode) Opcode {
-	switch lit.Op() {
-	case Null, True, False:
-		return lit
-	case Num, Str:
-		b := c.s.prog.Span(lit)
-		off := len(c.b.src) + len(c.b.text)
-		c.b.text = append(c.b.text, b...)
-
-		return makeNode(lit.Op(), off, len(b))
-	case Array:
-		mark := len(c.b.tmp)
-		defer func() { c.b.tmp = c.b.tmp[:mark] }()
-
-		for _, ch := range c.s.prog.Nodes(lit) {
-			c.b.tmp = append(c.b.tmp, c.copyLit(ch))
-		}
-
-		n := len(c.b.tmp) - mark
-		off := len(c.b.code)
-		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
-
-		return makeNode(Array, off, n)
-	case Object:
-		mark := len(c.b.tmp)
-		defer func() { c.b.tmp = c.b.tmp[:mark] }()
-
-		voff, vn := lit.Off(), lit.Arg()
-
-		for i := range vn {
-			c.b.tmp = append(c.b.tmp, c.copyLit(c.s.prog.code[voff+2*i]), c.copyLit(c.s.prog.code[voff+2*i+1]))
-		}
-
-		n := (len(c.b.tmp) - mark) / 2
-		off := len(c.b.code)
-		c.b.code = append(c.b.code, c.b.tmp[mark:]...)
-
-		return makeNode(Object, off, n)
-	default:
-		panic(lit)
-	}
-}
-
 func (c *cur) checkRequired(op, val Opcode) {
 	if val.Op() != Object {
 		return
@@ -530,21 +470,38 @@ func (c *cur) checkRequired(op, val Opcode) {
 	}
 }
 
-func (c *cur) checkItems(op, val Opcode) error {
+func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 	if val.Op() != Array {
-		return nil
+		return val, nil
 	}
+
+	mark := len(c.b.tmp)
+	defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
 	sub := c.s.prog.code[op.Off()]
 	voff, vn := val.Off(), val.Arg()
+	dirty := false
 
 	for i := range vn {
-		if _, err := c.apply(sub, c.b.code[voff+i]); err != nil {
-			return err
+		e := c.b.code[voff+i]
+
+		ne, err := c.apply(sub, e)
+		if err != nil {
+			return val, err
 		}
+
+		if ne != e {
+			dirty = true
+		}
+
+		c.b.tmp = append(c.b.tmp, ne)
 	}
 
-	return nil
+	if !dirty {
+		return val, nil
+	}
+
+	return c.b.Array(c.b.tmp[mark:]...), nil
 }
 
 func (c *cur) checkUnique(op, val Opcode) {
@@ -617,8 +574,7 @@ func (c *cur) checkOneOf(op, val Opcode) error {
 	return nil
 }
 
-// matches reports whether val satisfies op, discarding any diagnostics the
-// trial produced.
+// matches calls apply, but drops diag messages.
 func (c *cur) matches(op, val Opcode) (bool, error) {
 	n := len(c.diag)
 	defer func() { c.diag = c.diag[:n] }()
@@ -683,8 +639,6 @@ func (c *cur) Fail(op, val Opcode, msg string) {
 	c.diag = append(c.diag, d)
 }
 
-// result reports a hard error raised by a handler; ErrBreak is a clean stop, not
-// an error, so it falls through to the diagnostics verdict.
 func (c *cur) result(err error) error {
 	if err != nil && err != ErrBreak {
 		return err
@@ -712,8 +666,6 @@ func dataType(val Opcode) int {
 	}
 }
 
-// equalBuf reports JSON-semantic equality of value l in lb and value r in rb.
-// Objects are compared in document order (pragmatic).
 func equalBuf(lb *Buffer, l Opcode, rb *Buffer, r Opcode) bool {
 	if l.Op() != r.Op() {
 		return false

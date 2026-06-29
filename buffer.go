@@ -1,6 +1,9 @@
 package schema
 
-import "nikand.dev/go/json2"
+import (
+	"nikand.dev/go/json2"
+	"nikand.dev/go/skip"
+)
 
 type (
 	Buffer struct {
@@ -9,17 +12,27 @@ type (
 		text []byte   // produced scalars
 
 		tmp []Opcode // decode scratch
+
+		textbuf [16]byte
+
+		ro bool
 	}
 )
 
 func (b *Buffer) decode(r []byte) (Opcode, error) {
+	b.readOnly()
+
 	b.src = r
 	b.code = b.code[:0]
 	b.text = b.text[:0]
 
+	if b.text == nil {
+		b.text = b.textbuf[:]
+	}
+
 	var d json2.Iterator
 
-	val, i, err := b.value(r, 0)
+	val, i, err := b.value(r, 0, false)
 	if err != nil {
 		return 0, err
 	}
@@ -32,7 +45,27 @@ func (b *Buffer) decode(r []byte) (Opcode, error) {
 	return val, nil
 }
 
-func (b *Buffer) value(r []byte, st int) (val Opcode, i int, err error) {
+func (b *Buffer) FromJSON(r []byte) (Opcode, error) {
+	var d json2.Iterator
+
+	val, i, err := b.DecodeJSON(r, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	i = d.SkipSpaces(r, i)
+	if i != len(r) {
+		return 0, json2.ErrSyntax
+	}
+
+	return val, nil
+}
+
+func (b *Buffer) DecodeJSON(r []byte, st int) (Opcode, int, error) {
+	return b.value(r, st, true)
+}
+
+func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(r, st)
@@ -42,9 +75,9 @@ func (b *Buffer) value(r []byte, st int) (val Opcode, i int, err error) {
 
 	switch tp {
 	case json2.Object:
-		return b.object(r, i)
+		return b.object(r, i, intern)
 	case json2.Array:
-		return b.array(r, i)
+		return b.array(r, i, intern)
 	case json2.String, json2.Number:
 		op := Str
 		if tp == json2.Number {
@@ -54,6 +87,10 @@ func (b *Buffer) value(r []byte, st int) (val Opcode, i int, err error) {
 		j, err := d.Skip(r, i)
 		if err != nil {
 			return 0, j, err
+		}
+
+		if intern {
+			return b.EmitSpan(op, r[i:j]), j, nil
 		}
 
 		return makeNode(op, i, j-i), j, nil
@@ -73,7 +110,7 @@ func (b *Buffer) value(r []byte, st int) (val Opcode, i int, err error) {
 	}
 }
 
-func (b *Buffer) array(r []byte, st int) (Opcode, int, error) {
+func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
 	mark := len(b.tmp)
 	defer func() { b.tmp = b.tmp[:mark] }()
 
@@ -87,7 +124,7 @@ func (b *Buffer) array(r []byte, st int) (Opcode, int, error) {
 	var val Opcode
 
 	for d.ForMore(r, &i, json2.Array, &err) {
-		val, i, err = b.value(r, i)
+		val, i, err = b.value(r, i, intern)
 		if err != nil {
 			return 0, i, err
 		}
@@ -98,14 +135,10 @@ func (b *Buffer) array(r []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	n := len(b.tmp) - mark
-	off := len(b.code)
-	b.code = append(b.code, b.tmp[mark:]...)
-
-	return makeNode(Array, off, n), i, nil
+	return b.Array(b.tmp[mark:]...), i, nil
 }
 
-func (b *Buffer) object(r []byte, st int) (Opcode, int, error) {
+func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
 	mark := len(b.tmp)
 	defer func() { b.tmp = b.tmp[:mark] }()
 
@@ -119,12 +152,12 @@ func (b *Buffer) object(r []byte, st int) (Opcode, int, error) {
 	var key, val Opcode
 
 	for d.ForMore(r, &i, json2.Object, &err) {
-		key, i, err = b.value(r, i)
+		key, i, err = b.value(r, i, intern)
 		if err != nil {
 			return 0, i, err
 		}
 
-		val, i, err = b.value(r, i)
+		val, i, err = b.value(r, i, intern)
 		if err != nil {
 			return 0, i, err
 		}
@@ -135,14 +168,76 @@ func (b *Buffer) object(r []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	n := (len(b.tmp) - mark) / 2
-	off := len(b.code)
-	b.code = append(b.code, b.tmp[mark:]...)
-
-	return makeNode(Object, off, n), i, nil
+	return b.Object(b.tmp[mark:]...), i, nil
 }
 
-func (b *Buffer) encode(w []byte, val Opcode) []byte {
+func (b *Buffer) EmitSpan(op Opcode, s []byte) Opcode {
+	b.readOnly()
+
+	off := len(b.src) + len(b.text)
+	b.text = append(b.text, s...)
+
+	return makeNode(op.Op(), off, len(s))
+}
+
+func (b *Buffer) EmitString(s []byte) Opcode {
+	b.readOnly()
+
+	var e json2.Emitter
+
+	off := len(b.src) + len(b.text)
+	b.text = e.AppendString(b.text, s)
+
+	return makeNode(Str, off, len(b.src)+len(b.text)-off)
+}
+
+// Array assembles elems into a fresh array value in b.
+func (b *Buffer) Array(elems ...Opcode) Opcode {
+	b.readOnly()
+
+	off := len(b.code)
+	b.code = append(b.code, elems...)
+
+	return makeNode(Array, off, len(elems))
+}
+
+// Object assembles alternating key/value words into a fresh object value in b.
+func (b *Buffer) Object(kv ...Opcode) Opcode {
+	b.readOnly()
+
+	off := len(b.code)
+	b.code = append(b.code, kv...)
+
+	return makeNode(Object, off, len(kv)/2)
+}
+
+func (b *Buffer) CopyFrom(src *Buffer, op Opcode) Opcode {
+	b.readOnly()
+
+	switch op.Op() {
+	case Null, True, False:
+		return op
+	case Num, Str:
+		return b.EmitSpan(op, src.Span(op))
+	case Array, Object:
+		mark := len(b.tmp)
+		defer func() { b.tmp = b.tmp[:mark] }()
+
+		for _, ch := range src.Nodes(op) {
+			b.tmp = append(b.tmp, b.CopyFrom(src, ch))
+		}
+
+		if op.Op() == Object {
+			return b.Object(b.tmp[mark:]...)
+		}
+
+		return b.Array(b.tmp[mark:]...)
+	default:
+		panic(op)
+	}
+}
+
+func (b *Buffer) AppendJSON(w []byte, val Opcode) []byte {
 	switch val.Op() {
 	case Null:
 		return append(w, "null"...)
@@ -162,7 +257,7 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = b.encode(w, b.code[voff+i])
+			w = b.AppendJSON(w, b.code[voff+i])
 		}
 
 		return append(w, ']')
@@ -176,14 +271,83 @@ func (b *Buffer) encode(w []byte, val Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = b.encode(w, b.code[voff+2*i])
+			w = b.AppendJSON(w, b.code[voff+2*i])
 			w = append(w, ':')
-			w = b.encode(w, b.code[voff+2*i+1])
+			w = b.AppendJSON(w, b.code[voff+2*i+1])
 		}
 
 		return append(w, '}')
 	default:
 		panic(val)
+	}
+}
+
+func (b *Buffer) Span(op Opcode) []byte {
+	off, n := op.Off(), op.Arg()
+
+	if off < len(b.src) {
+		return b.src[off : off+n]
+	}
+
+	off -= len(b.src)
+
+	return b.text[off : off+n]
+}
+
+func (b *Buffer) Nodes(op Opcode) []Opcode {
+	off, n := op.Off(), op.Arg()
+	if op.Op() == Object || op.Op() == Properties {
+		n *= 2
+	}
+
+	return b.code[off : off+n]
+}
+
+// String returns decoded string as bytes.
+// Result lifetime is until any other method of that buffer is called.
+func (b *Buffer) String(op Opcode) []byte {
+	if op.Op() != Str {
+		panic(op)
+	}
+
+	sp := b.Span(op)
+
+	s, _, _, _ := skip.String(sp, 0, skip.Dqt)
+	if s.Err() {
+		return nil
+	}
+
+	if !s.Is(skip.Escapes) {
+		return sp[1 : len(sp)-1]
+	}
+
+	mark := len(b.text)
+	defer func() { b.text = b.text[:mark] }()
+
+	s, b.text, _, _ = skip.DecodeString(sp, 0, skip.Dqt|skip.StrEscapes, b.text)
+	if s.Err() {
+		return nil
+	}
+
+	return b.text[mark:]
+}
+
+func (b *Buffer) DecodeString(op Opcode, buf []byte) ([]byte, error) {
+	if op.Op() != Str {
+		panic(op)
+	}
+
+	var d json2.Iterator
+
+	sp := b.Span(op)
+
+	buf, _, err := d.DecodeString(sp, 0, buf)
+	return buf, err
+}
+
+func (b *Buffer) readOnly() {
+	if b.ro {
+		panic("read only")
 	}
 }
 
@@ -210,29 +374,3 @@ func (op Opcode) Op() Opcode { return op & opMask }
 func (op Opcode) Imm() int   { return int(op >> argShift) }
 func (op Opcode) Arg() int   { return int(op >> argShift & maxArg) }
 func (op Opcode) Off() int   { return int(op >> offShift) }
-
-// Nodes returns a block's child words: an Array's n elements, an Object's n
-// key/value pairs (2n words), or a keyword block's operands — what a handler
-// iterates to walk into a container. Object and Properties count pairs.
-func (b *Buffer) Nodes(op Opcode) []Opcode {
-	off, n := op.Off(), op.Arg()
-	if op.Op() == Object || op.Op() == Properties {
-		n *= 2
-	}
-
-	return b.code[off : off+n]
-}
-
-// Span resolves a scalar's bytes across the input and synthesized-text tail:
-// off below len(src) is original input, above is appended during rewrite.
-func (b *Buffer) Span(op Opcode) []byte {
-	off, n := op.Off(), op.Arg()
-
-	if off < len(b.src) {
-		return b.src[off : off+n]
-	}
-
-	off -= len(b.src)
-
-	return b.text[off : off+n]
-}
