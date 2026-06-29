@@ -78,6 +78,11 @@ func TestValidate(tb *testing.T) {
 
 		{`{"$defs":{"node":{"type":"object","properties":{"next":{"$ref":"#/$defs/node"}}}},"$ref":"#/$defs/node"}`, `{"next":{"next":{}}}`, true},
 		{`{"$defs":{"node":{"type":"object","properties":{"next":{"$ref":"#/$defs/node"}}}},"$ref":"#/$defs/node"}`, `{"next":5}`, false},
+
+		// pointer-escaped $defs key: escaped $ref resolves to the def's constraints.
+		{`{"$defs":{"a/b":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/a~1b"}}}`, `{"n":5}`, true},
+		{`{"$defs":{"a/b":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/a~1b"}}}`, `{"n":-1}`, false},
+		{`{"$defs":{"x~y":{"type":"integer"}},"properties":{"n":{"$ref":"#/$defs/x~0y"}}}`, `{"n":"s"}`, false},
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {
@@ -367,6 +372,154 @@ func TestWalkSchemaBuf(tb *testing.T) {
 
 	if !saw {
 		tb.Errorf("handler never saw a Properties op")
+	}
+}
+
+func TestPatternPropsValidate(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"patternProperties":{"^a":{"type":"number"}}}`, `{"a1":5}`, true},
+		{`{"patternProperties":{"^a":{"type":"number"}}}`, `{"a1":"x"}`, false}, // matched key, wrong type
+		{`{"patternProperties":{"^a":{"type":"number"}}}`, `{"b1":"x"}`, true},  // unmatched key, unconstrained
+
+		// a key matching two patterns must satisfy both subschemas.
+		{`{"patternProperties":{"^a":{"type":"number"},"1$":{"minimum":3}}}`, `{"a1":5}`, true},
+		{`{"patternProperties":{"^a":{"type":"number"},"1$":{"minimum":3}}}`, `{"a1":2}`, false}, // fails second
+
+		{`{"patternProperties":{"^a":{"type":"number"}}}`, `123`, true}, // not applicable to non-objects
+
+		{`{"patternProperties":{"\\t":{"type":"number"}}}`, `{"a\tb":"x"}`, false}, // regex \t matches decoded key
+		{`{"patternProperties":{"\\t":{"type":"number"}}}`, `{"axb":"x"}`, true},
+
+		// properties + patternProperties + additionalProperties:false interplay.
+		{`{"properties":{"id":{}},"patternProperties":{"^x":{}},"additionalProperties":false}`, `{"id":1,"x1":2}`, true},
+		{`{"properties":{"id":{}},"patternProperties":{"^x":{}},"additionalProperties":false}`, `{"y":1}`, false}, // neither named nor matched
+
+		// properties + patternProperties + additionalProperties subschema composing.
+		{`{"properties":{"id":{"type":"integer"}},"patternProperties":{"^x":{"type":"string"}},"additionalProperties":{"type":"boolean"}}`, `{"id":1,"x1":"a","ok":true}`, true},
+		{`{"properties":{"id":{"type":"integer"}},"patternProperties":{"^x":{"type":"string"}},"additionalProperties":{"type":"boolean"}}`, `{"id":1,"x1":2}`, false},    // pattern-matched wrong type
+		{`{"properties":{"id":{"type":"integer"}},"patternProperties":{"^x":{"type":"string"}},"additionalProperties":{"type":"boolean"}}`, `{"id":1,"other":5}`, false}, // additional wrong type
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		_, err = s.Validate([]byte(tc.data))
+		if (err == nil) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		}
+	}
+}
+
+func TestPatternPropsRewrite(tb *testing.T) {
+	for _, tc := range []struct{ schema, in, out string }{
+		{`{"patternProperties":{"^a":{"properties":{"k":{"default":1}}}}}`, `{"a1":{}}`, `{"a1":{"k":1}}`}, // sub fills nested default
+		{`{"patternProperties":{"^a":{"type":"string"}}}`, `{"a1":"x"}`, `{"a1":"x"}`},                     // unchanged: structural sharing
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		out, _, err := s.Rewrite(nil, []byte(tc.in))
+		if err != nil {
+			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("rewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
+	}
+}
+
+func TestPatternValidate(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"type":"string","pattern":"^a.*z$"}`, `"abcz"`, true},
+		{`{"type":"string","pattern":"^a.*z$"}`, `"abc"`, false},
+		{`{"type":"string","pattern":"^a.*z$"}`, `"zabcz"`, false},
+
+		{`{"pattern":"^a.*z$"}`, `123`, true}, // not applicable to non-strings
+
+		{`{"pattern":"b+"}`, `"abbbc"`, true}, // unanchored substring match
+		{`{"pattern":"b+"}`, `"acdef"`, false},
+
+		{`{"pattern":"a.b"}`, `"a\tb"`, true}, // dot matches decoded tab, not raw "\t"
+		{`{"pattern":"\\t"}`, `"a\tb"`, true}, // \t regex matches the decoded tab
+		{`{"pattern":"\\t"}`, `"axb"`, false},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		_, err = s.Validate([]byte(tc.data))
+		if (err == nil) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		}
+	}
+}
+
+func TestAdditionalValidate(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"additionalProperties":false}`, `{}`, true},
+		{`{"additionalProperties":false}`, `{"a":1}`, false},
+		{`{"properties":{"a":{}},"additionalProperties":false}`, `{"a":1}`, true}, // named not additional
+		{`{"properties":{"a":{}},"additionalProperties":false}`, `{"a":1,"b":2}`, false},
+
+		{`{"additionalProperties":{"type":"string"}}`, `{"x":"y"}`, true}, // no sibling: all additional
+		{`{"additionalProperties":{"type":"string"}}`, `{"x":1}`, false},
+
+		{`{"properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}`, `{"a":1,"b":"y"}`, true},
+		{`{"properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}`, `{"a":1,"b":2}`, false}, // extra wrong type
+		{`{"properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}`, `{"a":"x"}`, false},     // named wrong type
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		_, err = s.Validate([]byte(tc.data))
+		if (err == nil) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		}
+	}
+}
+
+func TestAdditionalRewrite(tb *testing.T) {
+	for _, tc := range []struct{ schema, in, out string }{
+		{`{"additionalProperties":{"properties":{"k":{"default":1}}}}`, `{"x":{}}`, `{"x":{"k":1}}`},                                       // sub rewrites additional value
+		{`{"additionalProperties":{"type":"string"}}`, `{"x":"y"}`, `{"x":"y"}`},                                                           // unchanged: structural sharing
+		{`{"properties":{"a":{"default":1},"b":{}},"additionalProperties":{"type":"string"}}`, `{"c":"z","b":2}`, `{"a":1,"b":2,"c":"z"}`}, // props reorder+default, then additional
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		out, _, err := s.Rewrite(nil, []byte(tc.in))
+		if err != nil {
+			tb.Errorf("rewrite %s against %s: %v", tc.in, tc.schema, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("rewrite %s against %s: got %q, want %q", tc.in, tc.schema, got, tc.out)
+		}
 	}
 }
 

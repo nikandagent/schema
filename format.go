@@ -50,10 +50,22 @@ func (s *Schema) Format(w []byte) []byte {
 
 func defName(p string) string {
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
+		p = p[i+1:]
 	}
 
-	return p
+	return pointerUnescape(p)
+}
+
+// pointerUnescape reverses pointerEscape: "~1"->'/', "~0"->'~' (order matters).
+func pointerUnescape(s string) string {
+	if !strings.Contains(s, "~") {
+		return s
+	}
+
+	s = strings.ReplaceAll(s, "~1", "/")
+	s = strings.ReplaceAll(s, "~0", "~")
+
+	return s
 }
 
 // appendRef writes a ref pointer, collapsing the legacy definitions prefix.
@@ -163,7 +175,26 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		return append(w, ']')
 	case Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 		return s.lit(w, s.prog.code[op.Off()])
-	case Items, Additional, Not:
+	case Additional:
+		_, _, sub := s.additionalParts(op)
+		return s.format(w, sub)
+	case PatternProps:
+		off, n := op.Off(), op.Arg()
+
+		w = append(w, '{')
+
+		for i := range n {
+			if i != 0 {
+				w = append(w, ',')
+			}
+
+			w = append(w, s.prog.Span(s.prog.code[off+2*i])...)
+			w = append(w, ':')
+			w = s.format(w, s.prog.code[off+2*i+1])
+		}
+
+		return append(w, '}')
+	case Items, Not:
 		return s.format(w, s.prog.code[op.Off()])
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
 		return strconv.AppendInt(w, int64(op.Imm()), 10)
@@ -223,6 +254,8 @@ func keywordName(op Opcode) string {
 		return "type"
 	case Properties:
 		return "properties"
+	case PatternProps:
+		return "patternProperties"
 	case Required:
 		return "required"
 	case Enum:

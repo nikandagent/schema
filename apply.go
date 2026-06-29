@@ -248,10 +248,17 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		return c.apply(c.s.refTarget(op), val)
 	case CallExt:
 		return c.s.xhooks[op.Arg()].h(c, c.s.prog.code[op.Off()], val)
-	case Raw:
-		// annotation kept for round-trip, no constraint
-	case Additional, Pattern, Default:
-		// TODO: additionalProperties (cross-keyword), pattern (regex), default (rewrite)
+	case Additional:
+		return c.checkAdditional(op, val)
+	case PatternProps:
+		return c.checkPatternProps(op, val)
+	case Pattern:
+		if val.Op() == Str && !c.s.patterns[op].Match(c.b.String(val)) {
+			c.Fail(op, val, "does not match pattern")
+		}
+	case Raw, Default:
+		// Raw is kept only for round-trip; Default is consumed by the enclosing
+		// Properties (insertion). Neither constrains a value at its own node.
 	default:
 		panic(op)
 	}
@@ -454,6 +461,142 @@ func (c *cur) defaultOf(sub Opcode) (Opcode, bool) {
 	}
 
 	return 0, false
+}
+
+func (c *cur) checkAdditional(op, val Opcode) (Opcode, error) {
+	if val.Op() != Object {
+		return val, nil
+	}
+
+	props, patterns, sub := c.s.additionalParts(op)
+
+	if !c.rewrite {
+		return val, c.validateAdditional(props, patterns, sub, val)
+	}
+
+	return c.rewriteAdditional(props, patterns, sub, val)
+}
+
+func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
+	voff, vn := val.Off(), val.Arg()
+
+	for i := range vn {
+		if c.covered(props, patterns, c.b.code[voff+2*i]) {
+			continue
+		}
+
+		if _, err := c.apply(sub, c.b.code[voff+2*i+1]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode) (Opcode, error) {
+	mark := len(c.b.tmp)
+	defer func() { c.b.tmp = c.b.tmp[:mark] }()
+
+	voff, vn := val.Off(), val.Arg()
+	dirty := false
+
+	for i := range vn {
+		key := c.b.code[voff+2*i]
+		v := c.b.code[voff+2*i+1]
+
+		if !c.covered(props, patterns, key) {
+			nv, err := c.apply(sub, v)
+			if err != nil {
+				return val, err
+			}
+
+			if nv != v {
+				v = nv
+				dirty = true
+			}
+		}
+
+		c.b.tmp = append(c.b.tmp, key, v)
+	}
+
+	if !dirty {
+		return val, nil
+	}
+
+	return c.b.Object(c.b.tmp[mark:]...), nil
+}
+
+// covered reports whether key is named in the sibling properties node or matched
+// by one of the sibling patternProperties — either way it is not additional.
+func (c *cur) covered(props, patterns, key Opcode) bool {
+	if props.Op() == Properties {
+		if _, ok := c.propSub(props, key); ok {
+			return true
+		}
+	}
+
+	return c.patternHit(patterns, key)
+}
+
+// patternHit reports whether key matches any regex in a patternProperties node.
+func (c *cur) patternHit(patterns, key Opcode) bool {
+	if patterns.Op() != PatternProps {
+		return false
+	}
+
+	off, n := patterns.Off(), patterns.Arg()
+
+	for i := range n {
+		if c.s.patterns[c.s.prog.code[off+2*i]].Match(c.b.String(key)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
+	if val.Op() != Object {
+		return val, nil
+	}
+
+	mark := len(c.b.tmp)
+	defer func() { c.b.tmp = c.b.tmp[:mark] }()
+
+	off, n := op.Off(), op.Arg()
+	voff, vn := val.Off(), val.Arg()
+	dirty := false
+
+	for i := range vn {
+		key := c.b.code[voff+2*i]
+		v := c.b.code[voff+2*i+1]
+
+		for j := range n {
+			pat := c.s.prog.code[off+2*j]
+
+			if !c.s.patterns[pat].Match(c.b.String(key)) {
+				continue
+			}
+
+			nv, err := c.apply(c.s.prog.code[off+2*j+1], v)
+			if err != nil {
+				return val, err
+			}
+
+			if nv != v {
+				v = nv
+				dirty = true
+			}
+		}
+
+		c.b.tmp = append(c.b.tmp, key, v)
+	}
+
+	if !c.rewrite || !dirty {
+		return val, nil
+	}
+
+	return c.b.Object(c.b.tmp[mark:]...), nil
 }
 
 func (c *cur) checkRequired(op, val Opcode) {

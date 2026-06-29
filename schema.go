@@ -1,5 +1,7 @@
 package schema
 
+import "regexp"
+
 type (
 	Schema struct {
 		Flags Flags // canonicalization switches; the zero value is the canonical default
@@ -9,6 +11,8 @@ type (
 
 		defs   []def
 		xhooks []hook // name -> "x-name" hook, bound at compile (SetXHook)
+
+		patterns map[Opcode]*regexp.Regexp // pattern node -> compiled regex, filled at compile
 
 		b Buffer // reused data arena for Validate/Rewrite
 	}

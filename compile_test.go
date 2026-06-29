@@ -11,6 +11,9 @@ func TestCompileError(tb *testing.T) {
 		`{} junk`,
 		`{"$ref":"#/$defs/missing"}`,
 		`{"$ref":"http://example.com/x"}`,
+		`{"pattern":"("}`,                // invalid regex
+		`{"patternProperties":{"(":{}}}`, // invalid regex key
+		`{"$defs":{"a/b":{"type":"integer"}},"$ref":"#/$defs/a/b"}`, // literal slash is navigation, not the escaped name
 	} {
 		var s Schema
 

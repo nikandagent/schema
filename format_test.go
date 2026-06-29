@@ -21,9 +21,15 @@ func TestFormat(tb *testing.T) {
 		{in: `{"const":{"a":[1,2]}}`},
 		{in: `{"items":{"type":"number"}}`},
 		{in: `{"additionalProperties":false}`},
+		{in: `{"additionalProperties":{"type":"string"}}`},
+		{in: `{"properties":{"a":{"type":"integer"}},"additionalProperties":false}`},
+		{in: `{"properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}`},
+		{in: `{"patternProperties":{"^a":{"type":"number"}}}`},
+		{in: `{"properties":{"a":{"type":"integer"}},"patternProperties":{"^x":{"type":"string"}},"additionalProperties":false}`},
 		{in: `{"allOf":[{"type":"object"},{"not":{"type":"string"}}]}`},
 		{in: `{"anyOf":[{"type":"string"},{"type":"integer"}]}`},
 		{in: `{"pattern":"^a.*$"}`},
+		{in: `{"type":"string","pattern":"^a.*z$"}`},
 		{in: `{"default":{"x":1},"type":"object"}`, out: `{"type":"object","default":{"x":1}}`},
 		{in: `{"title":"x","description":"y","type":"string"}`, out: `{"type":"string","title":"x","description":"y"}`},
 		{in: `{"x-foo":{"a":[1,2]},"type":"object"}`, out: `{"type":"object","x-foo":{"a":[1,2]}}`},
@@ -36,6 +42,14 @@ func TestFormat(tb *testing.T) {
 			out: `{"properties":{"n":{"$ref":"#/$defs/x"}},"$defs":{"x":{"type":"integer"}}}`},
 		{in: `{"definitions":{"x":{"type":"integer"}},"$ref":"#/definitions/x"}`,
 			out: `{"$ref":"#/$defs/x","$defs":{"x":{"type":"integer"}}}`},
+
+		// JSON Pointer escaped $defs keys: stored escaped, re-emitted original.
+		{in: `{"$defs":{"a/b":{"type":"integer"}},"properties":{"n":{"$ref":"#/$defs/a~1b"}}}`,
+			out: `{"properties":{"n":{"$ref":"#/$defs/a~1b"}},"$defs":{"a/b":{"type":"integer"}}}`},
+		{in: `{"$defs":{"x~y":{"type":"integer"}},"properties":{"n":{"$ref":"#/$defs/x~0y"}}}`,
+			out: `{"properties":{"n":{"$ref":"#/$defs/x~0y"}},"$defs":{"x~y":{"type":"integer"}}}`},
+		{in: `{"$defs":{"a/b~c":{"type":"integer"}},"properties":{"n":{"$ref":"#/$defs/a~1b~0c"}}}`,
+			out: `{"properties":{"n":{"$ref":"#/$defs/a~1b~0c"}},"$defs":{"a/b~c":{"type":"integer"}}}`},
 	} {
 		want := tc.out
 		if want == "" {

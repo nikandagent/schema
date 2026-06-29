@@ -2,6 +2,8 @@ package schema
 
 import (
 	"errors"
+	"regexp"
+	"strings"
 
 	"nikand.dev/go/json2"
 )
@@ -52,6 +54,7 @@ func (s *Schema) Compile(schema []byte) error {
 	b.tmp = b.tmp[:0]
 
 	s.defs = s.defs[:0]
+	clear(s.patterns)
 
 	if b.text == nil {
 		b.text = b.textbuf[:]
@@ -72,7 +75,11 @@ func (s *Schema) Compile(schema []byte) error {
 	s.root = root
 	s.prog.ro = true
 
-	return s.checkRefs()
+	if err := s.checkRefs(); err != nil {
+		return err
+	}
+
+	return s.checkPatterns()
 }
 
 // SetXHook binds h to the custom keyword "x-"+name. When Compile meets that
@@ -153,6 +160,8 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 		sortKeywords(s.prog.tmp[mark:])
 	}
 
+	s.linkAdditional(s.prog.tmp[mark:])
+
 	n := len(s.prog.tmp) - mark
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
@@ -166,6 +175,8 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 		return s.kwType(b, st)
 	case "properties":
 		return s.kwProps(b, st)
+	case "patternProperties":
+		return s.kwPatternProps(b, st)
 	case "required":
 		return s.kwList(Required, b, st)
 	case "enum":
@@ -303,6 +314,45 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
 	return makeNode(Properties, off, n), i, nil
+}
+
+// kwPatternProps parses patternProperties: a regex key (stored as a Pattern
+// span, compiled by checkPatterns like any other) paired with a subschema.
+func (s *Schema) kwPatternProps(b []byte, st int) (Opcode, int, error) {
+	mark := len(s.prog.tmp)
+	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
+
+	var d json2.Iterator
+
+	i, err := d.Enter(b, st, json2.Object)
+	if err != nil {
+		return 0, i, err
+	}
+
+	var pat, sub Opcode
+
+	for d.ForMore(b, &i, json2.Object, &err) {
+		pat, i, err = s.kwPattern(b, i)
+		if err != nil {
+			return 0, i, err
+		}
+
+		sub, i, err = s.compile(b, i)
+		if err != nil {
+			return 0, i, err
+		}
+
+		s.prog.tmp = append(s.prog.tmp, pat, sub)
+	}
+	if err != nil {
+		return 0, i, err
+	}
+
+	n := (len(s.prog.tmp) - mark) / 2
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
+
+	return makeNode(PatternProps, off, n), i, nil
 }
 
 func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
@@ -476,6 +526,20 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	return makeNode(Ref, off, n), j, nil
 }
 
+// pointerEscape encodes a definition name into a JSON Pointer reference token:
+// '~'->"~0", '/'->"~1" (order matters), so "a/b" stored as "a~1b" is comparable
+// to a $ref pointer and never ambiguous with a navigation step.
+func pointerEscape(s string) string {
+	if !strings.ContainsAny(s, "~/") {
+		return s
+	}
+
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
+
+	return s
+}
+
 func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 	var d json2.Iterator
 
@@ -500,7 +564,7 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		s.defs = append(s.defs, def{prefix + string(key), sub})
+		s.defs = append(s.defs, def{prefix + pointerEscape(string(key)), sub})
 	}
 	if err != nil {
 		return 0, i, err
@@ -574,6 +638,36 @@ func (s *Schema) checkRefs() error {
 	return nil
 }
 
+// checkPatterns compiles every pattern node up front, so a bad regex is a
+// schema error and apply can match without compiling or failing.
+func (s *Schema) checkPatterns() error {
+	for _, op := range s.prog.code {
+		if op.Op() != Pattern {
+			continue
+		}
+
+		var d json2.Iterator
+
+		src, _, err := d.DecodeString(s.prog.Span(op), 0, nil)
+		if err != nil {
+			return err
+		}
+
+		re, err := regexp.Compile(string(src))
+		if err != nil {
+			return ErrSchema
+		}
+
+		if s.patterns == nil {
+			s.patterns = map[Opcode]*regexp.Regexp{}
+		}
+
+		s.patterns[op] = re
+	}
+
+	return nil
+}
+
 func (s *Schema) refTarget(op Opcode) Opcode {
 	name := s.prog.Span(op)
 
@@ -628,7 +722,7 @@ func knownKeyword(name []byte) bool {
 		"title", "description", "examples", "readOnly", "writeOnly", "deprecated":
 		return true
 	case "if", "then", "else", "contains", "minContains", "maxContains",
-		"patternProperties", "propertyNames", "prefixItems",
+		"propertyNames", "prefixItems",
 		"dependentSchemas", "dependentRequired", "dependencies",
 		"unevaluatedItems", "unevaluatedProperties":
 		return true
@@ -647,9 +741,49 @@ var keywordOrder = []Opcode{
 	Minimum, Maximum, ExclMin, ExclMax, MultipleOf,
 	MinLen, MaxLen, Pattern,
 	MinItems, MaxItems, Unique, Items,
-	MinProps, MaxProps, Properties, Required, Additional,
+	MinProps, MaxProps, Properties, Required, PatternProps, Additional,
 	Not, AllOf, AnyOf, OneOf,
 	Default,
+}
+
+// linkAdditional gives an additionalProperties node references to its sibling
+// properties and patternProperties nodes, so apply can tell which keys are
+// already covered. Without either sibling the node keeps its lone subschema
+// (every property is additional).
+func (s *Schema) linkAdditional(and []Opcode) {
+	var props, patterns Opcode
+	ai := -1
+
+	for i, op := range and {
+		switch op.Op() {
+		case Properties:
+			props = op
+		case PatternProps:
+			patterns = op
+		case Additional:
+			ai = i
+		}
+	}
+
+	if ai < 0 || (props.Op() != Properties && patterns.Op() != PatternProps) {
+		return
+	}
+
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, props, patterns, s.prog.code[and[ai].Off()])
+
+	and[ai] = makeNode(Additional, off, 3)
+}
+
+// additionalParts splits an Additional node into its sibling properties and
+// patternProperties nodes (Pass when absent) and its subschema.
+func (s *Schema) additionalParts(op Opcode) (props, patterns, sub Opcode) {
+	if op.Arg() == 3 {
+		o := op.Off()
+		return s.prog.code[o], s.prog.code[o+1], s.prog.code[o+2]
+	}
+
+	return Pass, Pass, s.prog.code[op.Off()]
 }
 
 func (s *Schema) canonRequired(and []Opcode) {
