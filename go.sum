@@ -6,7 +6,7 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-nikand.dev/go/json2 v0.11.1-0.20251213155005-470ddea1d06f h1:OJLQwbGKc6tZlkBaTrHWlgEZ5St/IqhPs9aYnkcK4z8=
-nikand.dev/go/json2 v0.11.1-0.20251213155005-470ddea1d06f/go.mod h1:bUBGUxTFiDKtLwVkO/qT+4pYprt217JHt+KaZhCqAgA=
+nikand.dev/go/json2 v0.11.1-0.20260701153452-ea15068a4b50 h1:qC4d7zmtfmhwCuuLPGCludDGXDhPlWwXoPfOIytC0j0=
+nikand.dev/go/json2 v0.11.1-0.20260701153452-ea15068a4b50/go.mod h1:bUBGUxTFiDKtLwVkO/qT+4pYprt217JHt+KaZhCqAgA=
 nikand.dev/go/skip v0.0.0-20250318144159-13117a8602fa h1:uSFO6jp6uqmyOWdV2YXL2TytzrtoZDtg35v4KG/9dVE=
 nikand.dev/go/skip v0.0.0-20250318144159-13117a8602fa/go.mod h1:sxT9iqxrhIQGtoTQWbhSy7yhd5mmtenoHpG0buF6p1w=

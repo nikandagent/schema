@@ -20,9 +20,13 @@ func TestAnchor(tb *testing.T) {
 		{`{"b":"x"}`, false},
 		{`{"a":"x"}`, false}, // anchored subschema still applies in place
 	} {
-		_, err := s.Validate([]byte(tc.data))
-		if (err == nil) != tc.ok {
-			tb.Errorf("validate %s: ok=%v, err=%v", tc.data, tc.ok, err)
+		d, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s: unexpected error: %v", tc.data, err)
+			continue
+		}
+		if (len(d) == 0) != tc.ok {
+			tb.Errorf("validate %s: ok=%v, diag=%v", tc.data, tc.ok, d)
 		}
 	}
 
@@ -42,12 +46,12 @@ func TestDefsResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if _, err := s.Validate([]byte(`"x"`)); err != nil {
-		tb.Errorf("validate string: %v", err)
+	if d, err := s.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate string: err=%v diag=%v", err, d)
 	}
 
-	if _, err := s.Validate([]byte(`5`)); err == nil {
-		tb.Errorf("validate number: want error")
+	if d, _ := s.Validate([]byte(`5`)); len(d) == 0 {
+		tb.Errorf("validate number: want invalid")
 	}
 }
 
@@ -58,12 +62,12 @@ func TestDefsMerge(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if _, err := s.Validate([]byte(`{"a":"x","b":1}`)); err != nil {
-		tb.Errorf("validate ok-case: %v", err)
+	if d, err := s.Validate([]byte(`{"a":"x","b":1}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate ok-case: err=%v diag=%v", err, d)
 	}
 
-	if _, err := s.Validate([]byte(`{"a":1,"b":1}`)); err == nil {
-		tb.Errorf("validate bad A: want error")
+	if d, _ := s.Validate([]byte(`{"a":1,"b":1}`)); len(d) == 0 {
+		tb.Errorf("validate bad A: want invalid")
 	}
 
 	got := string(s.Format(nil))
@@ -94,12 +98,12 @@ func TestExternalAddDoc(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if _, err := s.Validate([]byte(`{"id":"x"}`)); err != nil {
-		tb.Errorf("validate ok: %v", err)
+	if d, err := s.Validate([]byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate ok: err=%v diag=%v", err, d)
 	}
 
-	if _, err := s.Validate([]byte(`{"id":5}`)); err == nil {
-		tb.Errorf("validate bad: want error")
+	if d, _ := s.Validate([]byte(`{"id":5}`)); len(d) == 0 {
+		tb.Errorf("validate bad: want invalid")
 	}
 
 	// whole-document external ref (no fragment) resolves to the doc root.
@@ -115,12 +119,12 @@ func TestExternalAddDoc(tb *testing.T) {
 		tb.Fatalf("compile whole-doc: %v", err)
 	}
 
-	if _, err := w.Validate([]byte(`"x"`)); err != nil {
-		tb.Errorf("validate whole-doc ok: %v", err)
+	if d, err := w.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate whole-doc ok: err=%v diag=%v", err, d)
 	}
 
-	if _, err := w.Validate([]byte(`5`)); err == nil {
-		tb.Errorf("validate whole-doc bad: want error")
+	if d, _ := w.Validate([]byte(`5`)); len(d) == 0 {
+		tb.Errorf("validate whole-doc bad: want invalid")
 	}
 
 	// unresolved external handle, no registry entry and no Resolve hook -> error.
@@ -144,12 +148,12 @@ func TestLazyResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if _, err := s.Validate([]byte(`{"id":"x"}`)); err != nil {
-		tb.Errorf("lazy validate ok: %v", err)
+	if d, err := s.Validate([]byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("lazy validate ok: err=%v diag=%v", err, d)
 	}
 
-	if _, err := s.Validate([]byte(`{"id":5}`)); err == nil {
-		tb.Errorf("lazy validate bad: want error")
+	if d, _ := s.Validate([]byte(`{"id":5}`)); len(d) == 0 {
+		tb.Errorf("lazy validate bad: want invalid")
 	}
 }
 
@@ -173,12 +177,12 @@ func TestMutualResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if _, err := s.Validate([]byte(`{"b":{"flag":true,"a":{"b":{}}}}`)); err != nil {
-		tb.Errorf("mutual ok (terminates one hop): %v", err)
+	if d, err := s.Validate([]byte(`{"b":{"flag":true,"a":{"b":{}}}}`)); err != nil || len(d) != 0 {
+		tb.Errorf("mutual ok (terminates one hop): err=%v diag=%v", err, d)
 	}
 
-	if _, err := s.Validate([]byte(`{"b":{"flag":1}}`)); err == nil {
-		tb.Errorf("mutual bad (flag not boolean): want error")
+	if d, _ := s.Validate([]byte(`{"b":{"flag":1}}`)); len(d) == 0 {
+		tb.Errorf("mutual bad (flag not boolean): want invalid")
 	}
 }
 

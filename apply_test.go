@@ -90,9 +90,13 @@ func TestValidate(tb *testing.T) {
 			continue
 		}
 
-		_, err = s.Validate([]byte(tc.data))
-		if (err == nil) != tc.ok {
-			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		diag, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s against %s: unexpected error: %v", tc.data, tc.schema, err)
+			continue
+		}
+		if (len(diag) == 0) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, diag)
 		}
 	}
 }
@@ -208,12 +212,17 @@ func TestWalk(tb *testing.T) {
 		wd, we := s.Walk([]byte(tc.data), delegate)
 		vd, ve := s.Validate([]byte(tc.data))
 
-		if (we == nil) != (ve == nil) || len(wd) != len(vd) {
-			tb.Errorf("walk delegate %s vs validate: we=%v ve=%v wd=%d vd=%d", tc.data, we, ve, len(wd), len(vd))
+		if we != nil || ve != nil {
+			tb.Errorf("walk delegate %s vs validate: unexpected error we=%v ve=%v", tc.data, we, ve)
+			continue
 		}
 
-		if (we == nil) != tc.ok {
-			tb.Errorf("walk %s against %s: ok=%v err=%v", tc.data, tc.schema, tc.ok, we)
+		if len(wd) != len(vd) {
+			tb.Errorf("walk delegate %s vs validate: wd=%d vd=%d", tc.data, len(wd), len(vd))
+		}
+
+		if (len(wd) == 0) != tc.ok {
+			tb.Errorf("walk %s against %s: ok=%v diag=%v", tc.data, tc.schema, tc.ok, wd)
 		}
 	}
 
@@ -238,13 +247,13 @@ func TestWalk(tb *testing.T) {
 		tb.Errorf("ErrBreak: err=%v calls=%d diag=%d, want nil/1/0", err, n, len(d))
 	}
 
-	// 4. c.Fail adds a diag and the verdict is invalid.
+	// 4. c.Fail records the verdict in a diag; ErrBreak is swallowed, so err is nil.
 	rep := func(c Applier, op, val Opcode) (Opcode, error) {
 		c.Fail(op, val, "handler says no")
 		return val, ErrBreak
 	}
 
-	if d, err := s.Walk([]byte(`"x"`), rep); !errors.Is(err, ErrInvalid) || len(d) != 1 || d[0].Msg != "handler says no" {
+	if d, err := s.Walk([]byte(`"x"`), rep); err != nil || len(d) != 1 || d[0].Msg != "handler says no" {
 		tb.Errorf("Fail: err=%v diag=%+v", err, d)
 	}
 }
@@ -289,8 +298,8 @@ func TestWalkRead(tb *testing.T) {
 	// delegating, so validation is unchanged.
 	got := map[string]bool{}
 
-	var collect func(b *Buffer, val Opcode)
-	collect = func(b *Buffer, val Opcode) {
+	var collect func(b BufferReader, val Opcode)
+	collect = func(b BufferReader, val Opcode) {
 		switch val.Op() {
 		case Num, Str:
 			got[string(b.Span(val))] = true
@@ -300,7 +309,7 @@ func TestWalkRead(tb *testing.T) {
 			}
 		case Object:
 			ns := b.Nodes(val)
-			if len(ns) != 2*val.Arg() { // regression guard: Object Nodes returns 2n words
+			if len(ns) != 2*int(val.Arg()) { // regression guard: Object Nodes returns 2n words
 				tb.Errorf("object nodes: got %d words, want %d (arg=%d)", len(ns), 2*val.Arg(), val.Arg())
 			}
 
@@ -312,7 +321,7 @@ func TestWalkRead(tb *testing.T) {
 	}
 
 	h := func(c Applier, op, val Opcode) (Opcode, error) {
-		collect(c.Buf(), val)
+		collect(c.Buf().Reader(), val)
 		return c.Apply(op, val)
 	}
 
@@ -349,7 +358,7 @@ func TestWalkSchemaBuf(tb *testing.T) {
 			saw = true
 
 			ns := c.SchemaBuf().Nodes(op)
-			if len(ns) != 2*op.Arg() {
+			if len(ns) != 2*int(op.Arg()) {
 				tb.Errorf("properties nodes: got %d words, want %d (arg=%d)", len(ns), 2*op.Arg(), op.Arg())
 			}
 
@@ -408,9 +417,13 @@ func TestPatternPropsValidate(tb *testing.T) {
 			continue
 		}
 
-		_, err = s.Validate([]byte(tc.data))
-		if (err == nil) != tc.ok {
-			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		diag, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s against %s: unexpected error: %v", tc.data, tc.schema, err)
+			continue
+		}
+		if (len(diag) == 0) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, diag)
 		}
 	}
 }
@@ -462,9 +475,13 @@ func TestPatternValidate(tb *testing.T) {
 			continue
 		}
 
-		_, err = s.Validate([]byte(tc.data))
-		if (err == nil) != tc.ok {
-			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		diag, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s against %s: unexpected error: %v", tc.data, tc.schema, err)
+			continue
+		}
+		if (len(diag) == 0) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, diag)
 		}
 	}
 }
@@ -492,9 +509,13 @@ func TestAdditionalValidate(tb *testing.T) {
 			continue
 		}
 
-		_, err = s.Validate([]byte(tc.data))
-		if (err == nil) != tc.ok {
-			tb.Errorf("validate %s against %s: ok=%v, err=%v", tc.data, tc.schema, tc.ok, err)
+		diag, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s against %s: unexpected error: %v", tc.data, tc.schema, err)
+			continue
+		}
+		if (len(diag) == 0) != tc.ok {
+			tb.Errorf("validate %s against %s: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, diag)
 		}
 	}
 }
@@ -530,7 +551,7 @@ func TestXHook(tb *testing.T) {
 		rewriting = c.Rewriting()
 
 		if c.Rewriting() && string(c.SchemaBuf().Span(op)) == `"upper"` && val.Op() == Str {
-			return c.Buf().EmitSpan(Str, bytes.ToUpper(c.Buf().Span(val))), nil
+			return c.Buf().Writer().Span(Str, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
 		}
 
 		return val, nil
@@ -596,7 +617,7 @@ func TestWalkFromJSON(tb *testing.T) {
 
 	h := func(c Applier, op, val Opcode) (Opcode, error) {
 		if val.Op() == Num {
-			return c.Buf().FromJSON([]byte(`{"wrapped":5}`))
+			return c.Buf().Writer().FromJSON([]byte(`{"wrapped":5}`))
 		}
 
 		return c.Apply(op, val)
@@ -622,7 +643,7 @@ func TestWalkEmitArray(tb *testing.T) {
 
 	repl := func(c Applier, op, val Opcode) (Opcode, error) {
 		if val.Op() == Num {
-			return c.Buf().EmitSpan(Num, []byte("42")), nil
+			return c.Buf().Writer().Span(Num, []byte("42")), nil
 		}
 
 		return c.Apply(op, val)
@@ -670,7 +691,7 @@ func TestWalkEmit(tb *testing.T) {
 
 		h := func(c Applier, op, val Opcode) (Opcode, error) {
 			if val.Op() == tc.emit {
-				return c.Buf().EmitSpan(tc.emit, []byte(tc.bytes)), nil
+				return c.Buf().Writer().Span(tc.emit, []byte(tc.bytes)), nil
 			}
 
 			return c.Apply(op, val)

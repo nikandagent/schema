@@ -30,31 +30,20 @@ type (
 	Applier interface {
 		Apply(op, val Opcode) (Opcode, error)
 		Fail(op, val Opcode, msg string)
-		Buf() *Buffer       // data arena (the value side)
-		SchemaBuf() *Buffer // program arena (the op side)
-		Rewriting() bool    // false under Validate/Walk (returned value ignored)
+		Buf() *Buffer            // data arena (the value side, read+write)
+		SchemaBuf() BufferReader // program arena (the op side, read-only)
+		Rewriting() bool         // false under Validate/Walk (returned value ignored)
 	}
 
 	Diag struct {
 		Off, Len int    // offending span in the input (0,0 for containers, TODO)
 		Op       Opcode // failed keyword
-		Level    Level
 		Msg      string
 	}
-
-	Level int
 )
 
-const (
-	Error Level = iota
-	Warning
-	Info
-)
-
-var (
-	ErrInvalid = errors.New("invalid")
-	ErrBreak   = errors.New("break") // a Handler returns it to stop the walk cleanly
-)
+// ErrBreak is returned by a Handler to stop the walk cleanly.
+var ErrBreak = errors.New("break")
 
 func (s *Schema) Validate(r []byte) ([]Diag, error) {
 	return s.Walk(r, nil)
@@ -104,7 +93,7 @@ func (s *Schema) WalkRewrite(w, r []byte, h Handler) ([]byte, []Diag, error) {
 		return w, c.diag, e
 	}
 
-	return c.b.AppendJSON(w, out), c.diag, nil
+	return c.b.Reader().AppendJSON(w, out), c.diag, nil
 }
 
 // Two arenas, walked in parallel but never interlinked — each node's spans
@@ -135,9 +124,9 @@ func (c *cur) Apply(op, val Opcode) (Opcode, error) {
 	return c.applyDefault(op, val)
 }
 
-func (c *cur) Buf() *Buffer       { return c.b }
-func (c *cur) SchemaBuf() *Buffer { return &c.s.prog }
-func (c *cur) Rewriting() bool    { return c.rewrite }
+func (c *cur) Buf() *Buffer            { return c.b }
+func (c *cur) SchemaBuf() BufferReader { return c.s.prog.Reader() }
+func (c *cur) Rewriting() bool         { return c.rewrite }
 
 func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	// Type-specific keywords are guarded on the value's type: per spec a keyword
@@ -147,7 +136,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	case Pass:
 	case Fail:
 		c.Fail(op, val, "schema forbids any value")
-	case And:
+	case All:
 		off, n := op.Off(), op.Arg()
 
 		for i := range n {
@@ -269,7 +258,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	case PatternProps:
 		return c.checkPatternProps(op, val)
 	case Pattern:
-		if val.Op() == Str && !c.s.patterns[op].Match(c.b.String(val)) {
+		if val.Op() == Str && !c.s.patterns[op].Match(c.b.Reader().String(val)) {
 			c.Fail(op, val, "does not match pattern")
 		}
 	case Raw, Default, Defs:
@@ -284,7 +273,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 }
 
 func (c *cur) checkType(op, val Opcode) {
-	mask := op.Imm()
+	mask := int(op.Imm())
 	t := dataType(val)
 
 	ok := mask&t != 0
@@ -347,7 +336,7 @@ func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
 		return val, nil
 	}
 
-	return c.b.Object(c.b.tmp[mark:]...), nil
+	return c.b.Writer().Object(c.b.tmp[mark:]...), nil
 }
 
 func (c *cur) orderedProps(op, val Opcode) (bool, error) {
@@ -388,7 +377,7 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 		}
 
 		if dv, ok := c.defaultOf(c.s.prog.code[off+2*i+1]); ok {
-			c.b.tmp = append(c.b.tmp, c.b.CopyFrom(&c.s.prog, key), c.b.CopyFrom(&c.s.prog, dv))
+			c.b.tmp = append(c.b.tmp, c.b.Writer().CopyFrom(c.s.prog.Reader(), key), c.b.Writer().CopyFrom(c.s.prog.Reader(), dv))
 			dirty = true
 		}
 	}
@@ -400,7 +389,7 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 	voff, vn := val.Off(), val.Arg()
 
 	dirty := false
-	j := 0 // source member slot the next emitted pair is compared against
+	j := int64(0) // source member slot the next emitted pair is compared against
 
 	off, n := op.Off(), op.Arg()
 
@@ -430,7 +419,7 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 		}
 
 		if dv, ok := c.defaultOf(sub); ok {
-			c.b.tmp = append(c.b.tmp, c.b.CopyFrom(&c.s.prog, key), c.b.CopyFrom(&c.s.prog, dv))
+			c.b.tmp = append(c.b.tmp, c.b.Writer().CopyFrom(c.s.prog.Reader(), key), c.b.Writer().CopyFrom(c.s.prog.Reader(), dv))
 			dirty = true
 		}
 	}
@@ -467,11 +456,11 @@ func (c *cur) propSub(op, key Opcode) (Opcode, bool) {
 }
 
 func (c *cur) defaultOf(sub Opcode) (Opcode, bool) {
-	if sub.Op() != And {
+	if sub.Op() != All {
 		return 0, false
 	}
 
-	for _, ch := range c.s.prog.Nodes(sub) {
+	for _, ch := range c.s.prog.Reader().Nodes(sub) {
 		if ch.Op() == Default {
 			return c.s.prog.code[ch.Off()], true
 		}
@@ -540,7 +529,7 @@ func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode) (Opcode, error
 		return val, nil
 	}
 
-	return c.b.Object(c.b.tmp[mark:]...), nil
+	return c.b.Writer().Object(c.b.tmp[mark:]...), nil
 }
 
 // covered reports whether key is named in the sibling properties node or matched
@@ -564,7 +553,7 @@ func (c *cur) patternHit(patterns, key Opcode) bool {
 	off, n := patterns.Off(), patterns.Arg()
 
 	for i := range n {
-		if c.s.patterns[c.s.prog.code[off+2*i]].Match(c.b.String(key)) {
+		if c.s.patterns[c.s.prog.code[off+2*i]].Match(c.b.Reader().String(key)) {
 			return true
 		}
 	}
@@ -591,7 +580,7 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 		for j := range n {
 			pat := c.s.prog.code[off+2*j]
 
-			if !c.s.patterns[pat].Match(c.b.String(key)) {
+			if !c.s.patterns[pat].Match(c.b.Reader().String(key)) {
 				continue
 			}
 
@@ -613,7 +602,7 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 		return val, nil
 	}
 
-	return c.b.Object(c.b.tmp[mark:]...), nil
+	return c.b.Writer().Object(c.b.tmp[mark:]...), nil
 }
 
 func (c *cur) checkRequired(op, val Opcode) {
@@ -661,7 +650,7 @@ func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 		return val, nil
 	}
 
-	return c.b.Array(c.b.tmp[mark:]...), nil
+	return c.b.Writer().Array(c.b.tmp[mark:]...), nil
 }
 
 func (c *cur) checkUnique(op, val Opcode) {
@@ -673,7 +662,7 @@ func (c *cur) checkUnique(op, val Opcode) {
 
 	for i := range vn {
 		for j := i + 1; j < vn; j++ {
-			if equalBuf(c.b, c.b.code[voff+i], c.b, c.b.code[voff+j]) {
+			if equalBuf(c.b.Reader(), c.b.code[voff+i], c.b.Reader(), c.b.code[voff+j]) {
 				c.Fail(op, val, "duplicate items")
 				return
 			}
@@ -759,21 +748,21 @@ func (c *cur) member(obj, key Opcode) (k, v Opcode, ok bool) {
 }
 
 func (c *cur) keyEq(data, schema Opcode) bool {
-	return bytes.Equal(c.b.Span(data), c.s.prog.Span(schema))
+	return bytes.Equal(c.b.Reader().Span(data), c.s.prog.Reader().Span(schema))
 }
 
 func (c *cur) equalLit(val, lit Opcode) bool {
-	return equalBuf(c.b, val, &c.s.prog, lit)
+	return equalBuf(c.b.Reader(), val, c.s.prog.Reader(), lit)
 }
 
 func (c *cur) number(val Opcode) float64 {
-	v, _ := json2.Value(c.b.Span(val)).Float64()
+	v, _ := json2.Value(c.b.Reader().Span(val)).Float64()
 	return v
 }
 
 func (c *cur) schemaNum(op Opcode) float64 {
 	lit := c.s.prog.code[op.Off()]
-	v, _ := json2.Value(c.s.prog.Span(lit)).Float64()
+	v, _ := json2.Value(c.s.prog.Reader().Span(lit)).Float64()
 	return v
 }
 
@@ -782,29 +771,32 @@ func (c *cur) integral(val Opcode) bool {
 	return v == math.Trunc(v)
 }
 
-func (c *cur) strlen(val Opcode) int {
+func (c *cur) strlen(val Opcode) int64 {
 	var d json2.Iterator
 
-	_, rs, _, _ := d.DecodedStringLength(c.b.src, val.Off())
-	return rs
+	_, rs, _, _ := d.DecodedStringLength(c.b.src, int(val.Off()))
+	return int64(rs)
 }
 
 func (c *cur) Fail(op, val Opcode, msg string) {
-	d := Diag{Op: op.Op(), Level: Error, Msg: msg}
+	d := Diag{Op: op.Op(), Msg: msg}
 
 	if sh := val.Op(); sh == Num || sh == Str {
-		d.Off, d.Len = val.Off(), val.Arg()
+		d.Off, d.Len = int(val.Off()), int(val.Arg())
 	}
 
 	c.diag = append(c.diag, d)
 }
 
+// result reports only real failures — a broken document, a handler error, a
+// failed ref. Validation diagnostics are not errors: the engine did its job, the
+// findings are in c.diag for the caller to read.
 func (c *cur) result(err error) error {
-	if err != nil && err != ErrBreak {
-		return err
+	if errors.Is(err, ErrBreak) {
+		return nil
 	}
 
-	return diagsError(c.diag)
+	return err
 }
 
 func dataType(val Opcode) int {
@@ -826,7 +818,7 @@ func dataType(val Opcode) int {
 	}
 }
 
-func equalBuf(lb *Buffer, l Opcode, rb *Buffer, r Opcode) bool {
+func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	if l.Op() != r.Op() {
 		return false
 	}
@@ -874,14 +866,4 @@ func equalBuf(lb *Buffer, l Opcode, rb *Buffer, r Opcode) bool {
 	default:
 		return false
 	}
-}
-
-func diagsError(d []Diag) error {
-	for _, x := range d {
-		if x.Level == Error {
-			return ErrInvalid
-		}
-	}
-
-	return nil
 }

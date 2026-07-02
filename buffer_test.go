@@ -33,7 +33,7 @@ func TestRoundtrip(tb *testing.T) {
 			continue
 		}
 
-		got := string(b.AppendJSON(nil, root))
+		got := string(b.Reader().AppendJSON(nil, root))
 		if got != want {
 			tb.Errorf("roundtrip %q: got %q, want %q", tc.in, got, want)
 		}
@@ -70,13 +70,13 @@ func TestFromJSON(tb *testing.T) {
 	} {
 		var b Buffer
 
-		root, err := b.FromJSON([]byte(in))
+		root, err := b.Writer().FromJSON([]byte(in))
 		if err != nil {
 			tb.Errorf("fromjson %q: %v", in, err)
 			continue
 		}
 
-		if got := string(b.AppendJSON(nil, root)); got != in {
+		if got := string(b.Reader().AppendJSON(nil, root)); got != in {
 			tb.Errorf("roundtrip %q: got %q", in, got)
 		}
 	}
@@ -90,7 +90,7 @@ func TestReuse(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	if got := string(b.AppendJSON(nil, root)); got != `[1,2,3]` {
+	if got := string(b.Reader().AppendJSON(nil, root)); got != `[1,2,3]` {
 		tb.Fatalf("first: %q", got)
 	}
 
@@ -99,7 +99,7 @@ func TestReuse(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	if got := string(b.AppendJSON(nil, root)); got != `{"x":true}` {
+	if got := string(b.Reader().AppendJSON(nil, root)); got != `{"x":true}` {
 		tb.Fatalf("reuse: %q", got)
 	}
 }

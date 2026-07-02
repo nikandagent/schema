@@ -25,6 +25,12 @@ func (s *Schema) Format(w []byte) []byte {
 	return s.format(w, s.root)
 }
 
+// FormatNode renders a single program node (e.g. a subschema reached via Root
+// and SchemaBuf) as schema JSON.
+func (s *Schema) FormatNode(w []byte, op Opcode) []byte {
+	return s.format(w, op)
+}
+
 // appendRef writes a ref pointer, collapsing the legacy definitions prefix.
 func appendRef(w, p []byte) []byte {
 	const legacy = "#/definitions/"
@@ -43,7 +49,7 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 		return append(w, "true"...)
 	case Fail:
 		return append(w, "false"...)
-	case And:
+	case All:
 		off, n := op.Off(), op.Arg()
 
 		w = append(w, '{')
@@ -85,7 +91,7 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Type:
-		return s.formatType(w, op.Imm())
+		return s.formatType(w, int(op.Imm()))
 	case Properties, Defs:
 		off, n := op.Off(), op.Arg()
 
@@ -145,7 +151,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = append(w, s.prog.Span(s.prog.code[off+2*i])...)
+			w = append(w, s.prog.Reader().Span(s.prog.code[off+2*i])...)
 			w = append(w, ':')
 			w = s.format(w, s.prog.code[off+2*i+1])
 		}
@@ -154,14 +160,14 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case Items, Not:
 		return s.format(w, s.prog.code[op.Off()])
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
-		return strconv.AppendInt(w, int64(op.Imm()), 10)
+		return strconv.AppendInt(w, op.Imm(), 10)
 	case Unique:
 		return append(w, "true"...)
 	case Pattern:
-		return append(w, s.prog.Span(op)...)
+		return append(w, s.prog.Reader().Span(op)...)
 	case Ref:
 		w = append(w, '"')
-		w = appendRef(w, s.prog.Span(op))
+		w = appendRef(w, s.prog.Reader().Span(op))
 		return append(w, '"')
 	default:
 		panic(op)
@@ -170,8 +176,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 
 // lit renders a value literal, reusing the data encoder over the program arena.
 func (s *Schema) lit(w []byte, val Opcode) []byte {
-	bf := Buffer{code: s.prog.code, src: s.prog.src}
-	return bf.AppendJSON(w, val)
+	return s.prog.Reader().AppendJSON(w, val)
 }
 
 func (s *Schema) formatType(w []byte, mask int) []byte {

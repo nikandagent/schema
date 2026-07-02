@@ -6,6 +6,9 @@ import (
 )
 
 type (
+	// Buffer stores decoded value nodes and their bytes. Read through Reader,
+	// write through Writer — the two thin wrappers split the value API so a
+	// signature says which half it needs.
 	Buffer struct {
 		code []Opcode // value node arena
 		src  []byte   // input bytes, spans point here
@@ -14,14 +17,27 @@ type (
 		tmp []Opcode // decode scratch
 
 		textbuf [16]byte
-
-		ro bool
 	}
+
+	// BufferReader is the read-only face of a Buffer.
+	BufferReader struct{ *Buffer }
+
+	// BufferWriter is the writable face of a Buffer; it appends nodes and bytes.
+	BufferWriter struct{ *Buffer }
 )
 
-func (b *Buffer) decode(r []byte) (Opcode, error) {
-	b.readOnly()
+func (b *Buffer) Reader() BufferReader { return BufferReader{b} }
+func (b *Buffer) Writer() BufferWriter { return BufferWriter{b} }
 
+func (b BufferWriter) FromJSON(r []byte) (Opcode, error) {
+	return b.Buffer.valueFull(r, true)
+}
+
+func (b BufferWriter) DecodeJSON(r []byte, st int) (Opcode, int, error) {
+	return b.value(r, st, true)
+}
+
+func (b *Buffer) decode(r []byte) (Opcode, error) {
 	b.src = r
 	b.code = b.code[:0]
 	b.text = b.text[:0]
@@ -30,39 +46,23 @@ func (b *Buffer) decode(r []byte) (Opcode, error) {
 		b.text = b.textbuf[:]
 	}
 
+	return b.valueFull(r, false)
+}
+
+func (b *Buffer) valueFull(r []byte, intern bool) (Opcode, error) {
 	var d json2.Iterator
 
-	val, i, err := b.value(r, 0, false)
+	val, i, err := b.value(r, 0, intern)
 	if err != nil {
 		return 0, err
 	}
 
 	i = d.SkipSpaces(r, i)
 	if i != len(r) {
-		return 0, json2.ErrSyntax
+		return 0, ErrTrailingData
 	}
 
 	return val, nil
-}
-
-func (b *Buffer) FromJSON(r []byte) (Opcode, error) {
-	var d json2.Iterator
-
-	val, i, err := b.DecodeJSON(r, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	i = d.SkipSpaces(r, i)
-	if i != len(r) {
-		return 0, json2.ErrSyntax
-	}
-
-	return val, nil
-}
-
-func (b *Buffer) DecodeJSON(r []byte, st int) (Opcode, int, error) {
-	return b.value(r, st, true)
 }
 
 func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err error) {
@@ -90,7 +90,7 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 		}
 
 		if intern {
-			return b.EmitSpan(op, r[i:j]), j, nil
+			return b.Writer().Span(op, r[i:j]), j, nil
 		}
 
 		return makeNode(op, i, j-i), j, nil
@@ -135,7 +135,7 @@ func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	return b.Array(b.tmp[mark:]...), i, nil
+	return b.Writer().Array(b.tmp[mark:]...), i, nil
 }
 
 func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
@@ -168,21 +168,17 @@ func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	return b.Object(b.tmp[mark:]...), i, nil
+	return b.Writer().Object(b.tmp[mark:]...), i, nil
 }
 
-func (b *Buffer) EmitSpan(op Opcode, s []byte) Opcode {
-	b.readOnly()
-
+func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
 	off := len(b.src) + len(b.text)
 	b.text = append(b.text, s...)
 
 	return makeNode(op.Op(), off, len(s))
 }
 
-func (b *Buffer) EmitString(s []byte) Opcode {
-	b.readOnly()
-
+func (b BufferWriter) String(s []byte) Opcode {
 	var e json2.Emitter
 
 	off := len(b.src) + len(b.text)
@@ -192,9 +188,7 @@ func (b *Buffer) EmitString(s []byte) Opcode {
 }
 
 // Array assembles elems into a fresh array value in b.
-func (b *Buffer) Array(elems ...Opcode) Opcode {
-	b.readOnly()
-
+func (b BufferWriter) Array(elems ...Opcode) Opcode {
 	off := len(b.code)
 	b.code = append(b.code, elems...)
 
@@ -202,23 +196,19 @@ func (b *Buffer) Array(elems ...Opcode) Opcode {
 }
 
 // Object assembles alternating key/value words into a fresh object value in b.
-func (b *Buffer) Object(kv ...Opcode) Opcode {
-	b.readOnly()
-
+func (b BufferWriter) Object(kv ...Opcode) Opcode {
 	off := len(b.code)
 	b.code = append(b.code, kv...)
 
 	return makeNode(Object, off, len(kv)/2)
 }
 
-func (b *Buffer) CopyFrom(src *Buffer, op Opcode) Opcode {
-	b.readOnly()
-
+func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 	switch op.Op() {
 	case Null, True, False:
 		return op
 	case Num, Str:
-		return b.EmitSpan(op, src.Span(op))
+		return b.Span(op, src.Span(op))
 	case Array, Object:
 		mark := len(b.tmp)
 		defer func() { b.tmp = b.tmp[:mark] }()
@@ -237,7 +227,7 @@ func (b *Buffer) CopyFrom(src *Buffer, op Opcode) Opcode {
 	}
 }
 
-func (b *Buffer) AppendJSON(w []byte, val Opcode) []byte {
+func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 	switch val.Op() {
 	case Null:
 		return append(w, "null"...)
@@ -282,8 +272,8 @@ func (b *Buffer) AppendJSON(w []byte, val Opcode) []byte {
 	}
 }
 
-func (b *Buffer) Span(op Opcode) []byte {
-	off, n := op.Off(), op.Arg()
+func (b BufferReader) Span(op Opcode) []byte {
+	off, n := int(op.Off()), int(op.Arg())
 
 	if off < len(b.src) {
 		return b.src[off : off+n]
@@ -294,7 +284,8 @@ func (b *Buffer) Span(op Opcode) []byte {
 	return b.text[off : off+n]
 }
 
-func (b *Buffer) Nodes(op Opcode) []Opcode {
+// Nodes unwraps block node. Result slice is owned by Buffer.
+func (b BufferReader) Nodes(op Opcode) []Opcode {
 	off, n := op.Off(), op.Arg()
 
 	switch op.Op() {
@@ -307,7 +298,7 @@ func (b *Buffer) Nodes(op Opcode) []Opcode {
 
 // String returns decoded string as bytes.
 // Result lifetime is until any other method of that buffer is called.
-func (b *Buffer) String(op Opcode) []byte {
+func (b BufferReader) String(op Opcode) []byte {
 	if op.Op() != Str {
 		panic(op)
 	}
@@ -334,7 +325,7 @@ func (b *Buffer) String(op Opcode) []byte {
 	return b.text[mark:]
 }
 
-func (b *Buffer) DecodeString(op Opcode, buf []byte) ([]byte, error) {
+func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
 	if op.Op() != Str {
 		panic(op)
 	}
@@ -345,12 +336,6 @@ func (b *Buffer) DecodeString(op Opcode, buf []byte) ([]byte, error) {
 
 	buf, _, err := d.DecodeString(sp, 0, buf)
 	return buf, err
-}
-
-func (b *Buffer) readOnly() {
-	if b.ro {
-		panic("read only")
-	}
 }
 
 func makeNode(op Opcode, off, n int) Opcode {
@@ -373,6 +358,6 @@ func makeImm(op Opcode, v int) Opcode {
 }
 
 func (op Opcode) Op() Opcode { return op & opMask }
-func (op Opcode) Imm() int   { return int(op >> argShift) }
-func (op Opcode) Arg() int   { return int(op >> argShift & maxArg) }
-func (op Opcode) Off() int   { return int(op >> offShift) }
+func (op Opcode) Imm() int64 { return int64(op >> argShift) }
+func (op Opcode) Arg() int64 { return int64(op >> argShift & maxArg) }
+func (op Opcode) Off() int64 { return int64(op >> offShift) }
