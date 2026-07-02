@@ -54,7 +54,7 @@ func (b *Buffer) valueFull(r []byte, intern bool) (Opcode, error) {
 
 	val, i, err := b.value(r, 0, intern)
 	if err != nil {
-		return 0, err
+		return 0, normSyntax(err)
 	}
 
 	i = d.SkipSpaces(r, i)
@@ -273,7 +273,7 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 }
 
 func (b BufferReader) Span(op Opcode) []byte {
-	off, n := int(op.Off()), int(op.Arg())
+	off, n := op.OffInt(), op.ArgInt()
 
 	if off < len(b.src) {
 		return b.src[off : off+n]
@@ -361,3 +361,9 @@ func (op Opcode) Op() Opcode { return op & opMask }
 func (op Opcode) Imm() int64 { return int64(op >> argShift) }
 func (op Opcode) Arg() int64 { return int64(op >> argShift & maxArg) }
 func (op Opcode) Off() int64 { return int64(op >> offShift) }
+
+// OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
+// lengths; the payload fields are far below math.MaxInt on any real program.
+func (op Opcode) OffInt() int { return int(op.Off()) }
+func (op Opcode) ArgInt() int { return int(op.Arg()) }
+func (op Opcode) ImmInt() int { return int(op.Imm()) }

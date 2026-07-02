@@ -273,7 +273,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 }
 
 func (c *cur) checkType(op, val Opcode) {
-	mask := int(op.Imm())
+	mask := op.ImmInt()
 	t := dataType(val)
 
 	ok := mask&t != 0
@@ -774,7 +774,7 @@ func (c *cur) integral(val Opcode) bool {
 func (c *cur) strlen(val Opcode) int64 {
 	var d json2.Iterator
 
-	_, rs, _, _ := d.DecodedStringLength(c.b.src, int(val.Off()))
+	_, rs, _, _ := d.DecodedStringLength(c.b.src, val.OffInt())
 	return int64(rs)
 }
 
@@ -782,7 +782,7 @@ func (c *cur) Fail(op, val Opcode, msg string) {
 	d := Diag{Op: op.Op(), Msg: msg}
 
 	if sh := val.Op(); sh == Num || sh == Str {
-		d.Off, d.Len = int(val.Off()), int(val.Arg())
+		d.Off, d.Len = val.OffInt(), val.ArgInt()
 	}
 
 	c.diag = append(c.diag, d)

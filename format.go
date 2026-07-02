@@ -91,7 +91,7 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Type:
-		return s.formatType(w, int(op.Imm()))
+		return s.formatType(w, op.ImmInt())
 	case Properties, Defs:
 		off, n := op.Off(), op.Arg()
 

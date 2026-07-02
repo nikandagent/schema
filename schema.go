@@ -86,7 +86,7 @@ const (
 // imm
 const (
 	Pass Opcode = imm | iota
-	bad
+	None        // no keyword; Error.Op when a failure isn't tied to one
 	Fail
 	Null
 	False
@@ -100,6 +100,8 @@ const (
 	MinProps
 	MaxProps
 	Canon
+
+	bad // internal: unresolved ref/anchor target
 )
 
 // span

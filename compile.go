@@ -61,7 +61,7 @@ func (s *Schema) Compile(schema []byte) error {
 
 	root, i, err := s.compile(schema, 0)
 	if err != nil {
-		return err
+		return normSyntax(err)
 	}
 
 	i = d.SkipSpaces(schema, i)
@@ -162,7 +162,7 @@ func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
 		i, err = d.Skip(b, i)
 		return op, i, err
 	default:
-		return 0, i, fmt.Errorf("%w: a schema must be an object or a boolean", ErrKeyword)
+		return 0, i, serr("a schema must be an object or a boolean", None, i, 0, ErrKeyword)
 	}
 }
 
@@ -333,7 +333,7 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 	default:
-		return 0, i, fmt.Errorf(`%w: "type" must be a string or array of type names`, ErrKeyword)
+		return 0, i, serr(`"type" must be a string or array of type names`, Type, st, i-st, ErrKeyword)
 	}
 
 	return makeImm(Type, mask), i, nil
@@ -513,7 +513,7 @@ func (s *Schema) kwImm(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	n, err := json2.Value(raw).Int()
 	if err != nil {
-		return 0, i, fmt.Errorf("%w: %q must be an integer", ErrKeyword, keywordName(op))
+		return 0, i, serr(fmt.Sprintf("%q must be an integer", keywordName(op)), op, st, i-st, ErrKeyword)
 	}
 
 	return makeImm(op, n), i, nil
@@ -529,7 +529,7 @@ func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
 
 	v, err := json2.Value(raw).Bool()
 	if err != nil {
-		return 0, i, fmt.Errorf(`%w: "uniqueItems" must be a boolean`, ErrKeyword)
+		return 0, i, serr(`"uniqueItems" must be a boolean`, Unique, st, i-st, ErrKeyword)
 	}
 
 	if !v {
@@ -548,7 +548,7 @@ func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if tp != json2.String {
-		return 0, i, fmt.Errorf(`%w: "pattern" must be a string`, ErrKeyword)
+		return 0, i, serr(`"pattern" must be a string`, Pattern, st, i-st, ErrKeyword)
 	}
 
 	j, err := d.Skip(b, i)
@@ -568,7 +568,7 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if tp != json2.String {
-		return 0, i, fmt.Errorf(`%w: "$ref" must be a string`, ErrKeyword)
+		return 0, i, serr(`"$ref" must be a string`, Ref, st, i-st, ErrKeyword)
 	}
 
 	j, err := d.Skip(b, i)
@@ -579,7 +579,7 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	// any URI-reference: "#..." internal, "doc#frag" external (resolved via docs).
 	off, n := i+1, j-i-2 // strip the quotes
 	if n < 1 {
-		return 0, i, fmt.Errorf(`%w: "$ref" must not be empty`, ErrKeyword)
+		return 0, i, serr(`"$ref" must not be empty`, Ref, st, j-st, ErrKeyword)
 	}
 
 	return makeNode(Ref, off, n), j, nil
@@ -644,7 +644,7 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	if !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown) {
-		return 0, st, fmt.Errorf("%w: %q", ErrUnknownKeyword, name)
+		return 0, st, serr(fmt.Sprintf("%q", name), None, kst, st-kst, ErrUnknownKeyword)
 	}
 
 	var d json2.Iterator
@@ -711,7 +711,7 @@ func (s *Schema) checkRefs() error {
 
 		if doc == "" {
 			if s.fragTarget(frag) == bad {
-				return fmt.Errorf("%w: %q", ErrRef, ref)
+				return serr(fmt.Sprintf("%q", ref), op, op.OffInt(), op.ArgInt(), ErrRef)
 			}
 
 			continue
@@ -719,14 +719,14 @@ func (s *Schema) checkRefs() error {
 
 		if t := s.docs[doc]; t != nil {
 			if t.fragTarget(frag) == bad {
-				return fmt.Errorf("%w: %q", ErrRef, ref)
+				return serr(fmt.Sprintf("%q", ref), op, op.OffInt(), op.ArgInt(), ErrRef)
 			}
 
 			continue
 		}
 
 		if s.Resolve == nil {
-			return fmt.Errorf("%w: no resolver for %q", ErrRef, ref)
+			return serr(fmt.Sprintf("no resolver for %q", ref), op, op.OffInt(), op.ArgInt(), ErrRef)
 		}
 	}
 
@@ -750,7 +750,9 @@ func (s *Schema) checkPatterns() error {
 
 		re, err := regexp.Compile(string(src))
 		if err != nil {
-			return fmt.Errorf("%w: %q: %w", ErrPattern, src, err)
+			reason := strings.TrimPrefix(err.Error(), "error parsing regexp: ")
+			msg := fmt.Sprintf("%q is not a valid regular expression: %s", src, reason)
+			return serr(msg, op, op.OffInt(), op.ArgInt(), ErrPattern)
 		}
 
 		if s.patterns == nil {
@@ -783,7 +785,7 @@ func (s *Schema) refResolve(op Opcode) (*Schema, Opcode, error) {
 
 	tnode := t.fragTarget(frag)
 	if tnode == bad {
-		return s, bad, fmt.Errorf("%w: %q", ErrRef, ref)
+		return s, bad, serr(fmt.Sprintf("%q", ref), op, op.OffInt(), op.ArgInt(), ErrRef)
 	}
 
 	return t, tnode, nil
@@ -798,7 +800,7 @@ func (s *Schema) loadDoc(handle string) (*Schema, error) {
 	}
 
 	if s.Resolve == nil {
-		return nil, fmt.Errorf("%w: no resolver for %q", ErrRef, handle)
+		return nil, serr(fmt.Sprintf("no resolver for %q", handle), None, 0, 0, ErrRef)
 	}
 
 	body, err := s.Resolve(s.id, handle)
@@ -1001,7 +1003,7 @@ func (s *Schema) canonRequired(and []Opcode) {
 }
 
 func (s *Schema) propIndex(props, name Opcode) int {
-	off, n := int(props.Off()), int(props.Arg())
+	off, n := props.OffInt(), props.ArgInt()
 
 	for i := range n {
 		if string(s.prog.Reader().Span(s.prog.code[off+2*i])) == string(s.prog.Reader().Span(name)) {
