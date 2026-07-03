@@ -17,6 +17,9 @@ type (
 
 		rewrite bool
 		diag    []Diag
+
+		spath []Opcode
+		dpath []Opcode
 	}
 
 	// Handler runs in place of the default apply for a node during Walk and
@@ -33,10 +36,19 @@ type (
 		Buf() *Buffer            // data arena (the value side, read+write)
 		SchemaBuf() BufferReader // program arena (the op side, read-only)
 		Rewriting() bool         // false under Validate/Walk (returned value ignored)
+
+		// DataPath/SchemaPath are the descent from the root to the current node,
+		// one step per object member or array element (allOf/anyOf/$ref stay put,
+		// so len is the data depth: 0 at the root). A DataPath step is the data
+		// key (a Str node) or the array index (an IntLit); the matching SchemaPath
+		// step is the subschema applied there. Both are valid only for the
+		// duration of the handler call.
+		DataPath() []Opcode
+		SchemaPath() []Opcode
 	}
 
 	Diag struct {
-		Off, Len int    // offending span in the input (0,0 for containers, TODO)
+		Off, End int    // offending half-open span in the input (see cur.span)
 		Op       Opcode // failed keyword
 		Msg      string
 	}
@@ -127,6 +139,29 @@ func (c *cur) Apply(op, val Opcode) (Opcode, error) {
 func (c *cur) Buf() *Buffer            { return c.b }
 func (c *cur) SchemaBuf() BufferReader { return c.s.prog.Reader() }
 func (c *cur) Rewriting() bool         { return c.rewrite }
+
+func (c *cur) DataPath() []Opcode   { return c.dpath }
+func (c *cur) SchemaPath() []Opcode { return c.spath }
+
+// applyChild applies sub to a member/element value while the descent is on the
+// path: sub joins spath, step (a Str key node or an IntLit index) joins dpath.
+// The defer pops both even if apply panics.
+func (c *cur) applyChild(sub, val, step Opcode) (Opcode, error) {
+	c.push(sub, step)
+	defer c.pop()
+
+	return c.apply(sub, val)
+}
+
+func (c *cur) push(sub, step Opcode) {
+	c.spath = append(c.spath, sub)
+	c.dpath = append(c.dpath, step)
+}
+
+func (c *cur) pop() {
+	c.spath = c.spath[:len(c.spath)-1]
+	c.dpath = c.dpath[:len(c.dpath)-1]
+}
 
 func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	// Type-specific keywords are guarded on the value's type: per spec a keyword
@@ -302,11 +337,11 @@ func (c *cur) validateProps(op, val Opcode) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		key := c.s.prog.code[off+2*i]
+		name := c.s.prog.code[off+2*i]
 		sub := c.s.prog.code[off+2*i+1]
 
-		if _, mv, ok := c.member(val, key); ok {
-			if _, err := c.apply(sub, mv); err != nil {
+		if key, v, ok := c.member(val, name); ok {
+			if _, err := c.applyChild(sub, v, key); err != nil {
 				return err
 			}
 		}
@@ -349,7 +384,7 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 		v := c.b.code[voff+2*i+1]
 
 		if sub, ok := c.propSub(op, key); ok {
-			nv, err := c.apply(sub, v)
+			nv, err := c.applyChild(sub, v, key)
 			if err != nil {
 				return dirty, err
 			}
@@ -370,14 +405,14 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		key := c.s.prog.code[off+2*i]
+		name := c.s.prog.code[off+2*i]
 
-		if _, _, ok := c.member(val, key); ok {
+		if _, _, ok := c.member(val, name); ok {
 			continue
 		}
 
 		if dv, ok := c.defaultOf(c.s.prog.code[off+2*i+1]); ok {
-			c.b.tmp = append(c.b.tmp, c.b.Writer().CopyFrom(c.s.prog.Reader(), key), c.b.Writer().CopyFrom(c.s.prog.Reader(), dv))
+			c.b.tmp = append(c.b.tmp, c.copyLit(name), c.copyLit(dv))
 			dirty = true
 		}
 	}
@@ -394,22 +429,22 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		key := c.s.prog.code[off+2*i]
+		name := c.s.prog.code[off+2*i]
 		sub := c.s.prog.code[off+2*i+1]
 
-		if dk, v, ok := c.member(val, key); ok {
-			nv, err := c.apply(sub, v)
+		if key, v, ok := c.member(val, name); ok {
+			nv, err := c.applyChild(sub, v, key)
 			if err != nil {
 				return dirty, err
 			}
 
 			v = nv
 
-			if dk != c.b.code[voff+2*j] || v != c.b.code[voff+2*j+1] {
+			if key != c.b.code[voff+2*j] || v != c.b.code[voff+2*j+1] {
 				dirty = true
 			}
 
-			c.b.tmp = append(c.b.tmp, dk, v)
+			c.b.tmp = append(c.b.tmp, key, v)
 			j++
 			continue
 		}
@@ -419,7 +454,7 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 		}
 
 		if dv, ok := c.defaultOf(sub); ok {
-			c.b.tmp = append(c.b.tmp, c.b.Writer().CopyFrom(c.s.prog.Reader(), key), c.b.Writer().CopyFrom(c.s.prog.Reader(), dv))
+			c.b.tmp = append(c.b.tmp, c.copyLit(name), c.copyLit(dv))
 			dirty = true
 		}
 	}
@@ -469,6 +504,12 @@ func (c *cur) defaultOf(sub Opcode) (Opcode, bool) {
 	return 0, false
 }
 
+// copyLit lifts a schema-arena literal (a property name or default value) into
+// the data arena.
+func (c *cur) copyLit(op Opcode) Opcode {
+	return c.b.Writer().CopyFrom(c.s.prog.Reader(), op)
+}
+
 func (c *cur) checkAdditional(op, val Opcode) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
@@ -487,11 +528,14 @@ func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
 	voff, vn := val.Off(), val.Arg()
 
 	for i := range vn {
-		if c.covered(props, patterns, c.b.code[voff+2*i]) {
+		key := c.b.code[voff+2*i]
+		v := c.b.code[voff+2*i+1]
+
+		if c.covered(props, patterns, key) {
 			continue
 		}
 
-		if _, err := c.apply(sub, c.b.code[voff+2*i+1]); err != nil {
+		if _, err := c.applyChild(sub, v, key); err != nil {
 			return err
 		}
 	}
@@ -511,7 +555,7 @@ func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode) (Opcode, error
 		v := c.b.code[voff+2*i+1]
 
 		if !c.covered(props, patterns, key) {
-			nv, err := c.apply(sub, v)
+			nv, err := c.applyChild(sub, v, key)
 			if err != nil {
 				return val, err
 			}
@@ -579,12 +623,13 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 
 		for j := range n {
 			pat := c.s.prog.code[off+2*j]
+			sub := c.s.prog.code[off+2*j+1]
 
 			if !c.s.patterns[pat].Match(c.b.Reader().String(key)) {
 				continue
 			}
 
-			nv, err := c.apply(c.s.prog.code[off+2*j+1], v)
+			nv, err := c.applyChild(sub, v, key)
 			if err != nil {
 				return val, err
 			}
@@ -632,18 +677,18 @@ func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 	dirty := false
 
 	for i := range vn {
-		e := c.b.code[voff+i]
+		v := c.b.code[voff+i]
 
-		ne, err := c.apply(sub, e)
+		nv, err := c.applyChild(sub, v, makeImm(IntLit, int(i)))
 		if err != nil {
 			return val, err
 		}
 
-		if ne != e {
+		if nv != v {
 			dirty = true
 		}
 
-		c.b.tmp = append(c.b.tmp, ne)
+		c.b.tmp = append(c.b.tmp, nv)
 	}
 
 	if !dirty {
@@ -779,13 +824,8 @@ func (c *cur) strlen(val Opcode) int64 {
 }
 
 func (c *cur) Fail(op, val Opcode, msg string) {
-	d := Diag{Op: op.Op(), Msg: msg}
-
-	if sh := val.Op(); sh == Num || sh == Str {
-		d.Off, d.Len = val.OffInt(), val.ArgInt()
-	}
-
-	c.diag = append(c.diag, d)
+	off, end := c.b.Reader().span(val)
+	c.diag = append(c.diag, Diag{Off: off, End: end, Op: op.Op(), Msg: msg})
 }
 
 // result reports only real failures — a broken document, a handler error, a

@@ -60,10 +60,13 @@ func (s *Schema) SchemaBuf() BufferReader { return s.prog.Reader() }
 //
 // payload by shape:
 //
-//	imm                value:56
-//	span      off:32 |   len:24
-//	block   index:32 | count:24
-//	ref    target:32 |   arg:24
+//	imm              value:56
+//	span    off:32 |   len:24
+//	block index:32 | count:24
+//
+// span2 is the top half of the span code range (code >= 16): valueless scalars
+// (null/true/false) that still carry a source span. Ref and CallExt are
+// span-shaped too, in the low span codes.
 const (
 	shapeShift = 5
 	opMask     = 1<<8 - 1
@@ -71,26 +74,28 @@ const (
 	argShift = 8
 	offShift = 32
 
-	maxArg = 1<<24 - 1
-	maxOff = 1<<32 - 1
-	maxImm = 1<<56 - 1
+	argMask = 1<<24 - 1 // full fields, for extraction
+	offMask = 1<<32 - 1
+	immMask = 1<<56 - 1
+
+	// The top 4 values of each field are reserved as future sentinels (e.g. a
+	// field == its mask-k means the real value continues in the next opcode).
+	maxArg = argMask - 4
+	maxOff = offMask - 4
+	maxImm = immMask - 4
 )
 
 const (
 	imm Opcode = iota << shapeShift
 	span
 	block
-	ref
+
+	span2 = span + 1<<(shapeShift-1) // second half of span
 )
 
-// imm
 const (
 	Pass Opcode = imm | iota
-	None        // no keyword; Error.Op when a failure isn't tied to one
 	Fail
-	Null
-	False
-	True
 	Type
 	Unique
 	MinLen
@@ -101,17 +106,29 @@ const (
 	MaxProps
 	Canon
 
+	None    // no keyword; Error.Op when a failure isn't tied to one
+	IntLit  // integer literal: a data-path array index
+	SrcOff  // 56-bit source offset parked before a container (point / overflow)
+	SrcSpan // source span (off:32 | len:24) parked before a container's nodes
+
 	bad // internal: unresolved ref/anchor target
 )
 
-// span
 const (
 	Num Opcode = span | iota
 	Str
 	Pattern
+
+	Ref
+	CallExt
 )
 
-// block
+const (
+	Null Opcode = span2 | iota
+	False
+	True
+)
+
 const (
 	All Opcode = block | iota
 	AllOf
@@ -135,10 +152,4 @@ const (
 	PatternProps
 	Defs
 	Raw
-)
-
-// ref
-const (
-	Ref Opcode = ref | iota
-	CallExt
 )

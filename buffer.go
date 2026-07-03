@@ -95,16 +95,24 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 
 		return makeNode(op, i, j-i), j, nil
 	case json2.Null:
-		i, err = d.Skip(r, i)
-		return Null, i, err
-	case json2.Bool:
-		val = False
-		if r[i] == 't' {
-			val = True
+		j, err := d.Skip(r, i)
+		if err != nil {
+			return 0, j, err
 		}
 
-		i, err = d.Skip(r, i)
-		return val, i, err
+		return makeNode(Null, i, j-i), j, nil
+	case json2.Bool:
+		op := False
+		if r[i] == 't' {
+			op = True
+		}
+
+		j, err := d.Skip(r, i)
+		if err != nil {
+			return 0, j, err
+		}
+
+		return makeNode(op, i, j-i), j, nil
 	default:
 		return 0, i, json2.ErrSyntax
 	}
@@ -135,7 +143,7 @@ func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	return b.Writer().Array(b.tmp[mark:]...), i, nil
+	return b.Writer().Nodes(Array, b.tmp[mark:], st, i), i, nil
 }
 
 func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
@@ -168,7 +176,7 @@ func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	return b.Writer().Object(b.tmp[mark:]...), i, nil
+	return b.Writer().Nodes(Object, b.tmp[mark:], st, i), i, nil
 }
 
 func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
@@ -187,21 +195,36 @@ func (b BufferWriter) String(s []byte) Opcode {
 	return makeNode(Str, off, len(b.src)+len(b.text)-off)
 }
 
-// Array assembles elems into a fresh array value in b.
-func (b BufferWriter) Array(elems ...Opcode) Opcode {
-	off := len(b.code)
-	b.code = append(b.code, elems...)
+// Nodes assembles nodes into a fresh container of kind cont (Array or Object) in
+// b. When st >= 0 it parks the source span [st,end) just before the nodes,
+// readable via span; pass st < 0 for a synthesized value with no source. The
+// span rides one SrcSpan word, or two SrcOff words (start, end) when it is too
+// wide for the len field.
+func (b BufferWriter) Nodes(cont Opcode, nodes []Opcode, st, end int) Opcode {
+	if st >= 0 {
+		if n := end - st; n >= 0 && n <= maxArg {
+			b.code = append(b.code, makeNode(SrcSpan, st, n))
+		} else {
+			b.code = append(b.code, makeImm(SrcOff, st), makeImm(SrcOff, end))
+		}
+	}
 
-	return makeNode(Array, off, len(elems))
+	off := len(b.code)
+	b.code = append(b.code, nodes...)
+
+	n := len(nodes)
+	if cont.Op() == Object {
+		n /= 2
+	}
+
+	return makeNode(cont.Op(), off, n)
 }
+
+// Array assembles elems into a fresh array value in b.
+func (b BufferWriter) Array(elems ...Opcode) Opcode { return b.Nodes(Array, elems, -1, -1) }
 
 // Object assembles alternating key/value words into a fresh object value in b.
-func (b BufferWriter) Object(kv ...Opcode) Opcode {
-	off := len(b.code)
-	b.code = append(b.code, kv...)
-
-	return makeNode(Object, off, len(kv)/2)
-}
+func (b BufferWriter) Object(kv ...Opcode) Opcode { return b.Nodes(Object, kv, -1, -1) }
 
 func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 	switch op.Op() {
@@ -273,15 +296,35 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 }
 
 func (b BufferReader) Span(op Opcode) []byte {
-	off, n := op.OffInt(), op.ArgInt()
+	off, end := b.span(op)
 
+	// Spans resolve a virtual src++text concat: bytes below len(src) live in the
+	// read-only input, the rest in the produced-scalar tail.
 	if off < len(b.src) {
-		return b.src[off : off+n]
+		return b.src[off:end]
 	}
 
-	off -= len(b.src)
+	return b.text[off-len(b.src) : end-len(b.src)]
+}
 
-	return b.text[off : off+n]
+func (b BufferReader) span(op Opcode) (off, end int) {
+	switch op.Op() {
+	case Num, Str, Null, False, True, Pattern, Ref:
+		return op.SpanInt()
+	case Object, Array:
+	default:
+		panic(op.Op())
+	}
+
+	idx := op.OffInt()
+	if idx-1 >= 0 && b.code[idx-1].Op() == SrcSpan {
+		return b.code[idx-1].SpanInt()
+	}
+	if idx-2 >= 0 && b.code[idx-2].Op() == SrcOff && b.code[idx-1].Op() == SrcOff {
+		return b.code[idx-2].ImmInt(), b.code[idx-1].ImmInt()
+	}
+
+	return 0, 0
 }
 
 // Nodes unwraps block node. Result slice is owned by Buffer.
@@ -358,12 +401,14 @@ func makeImm(op Opcode, v int) Opcode {
 }
 
 func (op Opcode) Op() Opcode { return op & opMask }
-func (op Opcode) Imm() int64 { return int64(op >> argShift) }
-func (op Opcode) Arg() int64 { return int64(op >> argShift & maxArg) }
-func (op Opcode) Off() int64 { return int64(op >> offShift) }
+func (op Opcode) Imm() int64 { return int64(op >> argShift & immMask) }
+func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
+func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
 
 // OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
 // lengths; the payload fields are far below math.MaxInt on any real program.
 func (op Opcode) OffInt() int { return int(op.Off()) }
 func (op Opcode) ArgInt() int { return int(op.Arg()) }
 func (op Opcode) ImmInt() int { return int(op.Imm()) }
+
+func (op Opcode) SpanInt() (off, end int) { off = op.OffInt(); return off, off + op.ArgInt() }
