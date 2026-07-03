@@ -46,12 +46,6 @@ type (
 		DataPath() []Opcode
 		SchemaPath() []Opcode
 	}
-
-	Diag struct {
-		Off, End int    // offending half-open span in the input (see cur.span)
-		Op       Opcode // failed keyword
-		Msg      string
-	}
 )
 
 // ErrBreak is returned by a Handler to stop the walk cleanly.
@@ -286,8 +280,6 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		c.s = saved
 
 		return v, err
-	case CallExt:
-		return c.s.xhooks[op.Arg()].h(c, c.s.prog.code[op.Off()], val)
 	case Additional:
 		return c.checkAdditional(op, val)
 	case PatternProps:
@@ -296,10 +288,10 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		if val.Op() == Str && !c.s.patterns[op].Match(c.b.Reader().String(val)) {
 			c.Fail(op, val, "does not match pattern")
 		}
-	case Raw, Default, Defs:
-		// Raw is kept only for round-trip; Default is consumed by the enclosing
-		// Properties (insertion); Defs only holds definitions reached via $ref.
-		// None constrains a value at its own node.
+	case Raw, Ext, Default, Defs:
+		// Raw/Ext are kept only for round-trip (a Walk handler acts on Ext);
+		// Default is consumed by the enclosing Properties (insertion); Defs only
+		// holds definitions reached via $ref. None constrains a value here.
 	default:
 		panic(op)
 	}

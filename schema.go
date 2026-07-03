@@ -9,8 +9,7 @@ type (
 		root Opcode
 		prog Buffer // compiled program: code nodes + schema bytes (src) + compile scratch (tmp)
 
-		defs   []def
-		xhooks []hook // name -> "x-name" hook, bound at compile (SetXHook)
+		defs []def
 
 		id   string             // this document's base URI ($id or registration key)
 		docs map[string]*Schema // shared registry: base URI -> compiled document
@@ -65,8 +64,8 @@ func (s *Schema) SchemaBuf() BufferReader { return s.prog.Reader() }
 //	block index:32 | count:24
 //
 // span2 is the top half of the span code range (code >= 16): valueless scalars
-// (null/true/false) that still carry a source span. Ref and CallExt are
-// span-shaped too, in the low span codes.
+// (null/true/false) that still carry a source span. Ref is span-shaped too, in
+// the low span codes.
 const (
 	shapeShift = 5
 	opMask     = 1<<8 - 1
@@ -120,7 +119,6 @@ const (
 	Pattern
 
 	Ref
-	CallExt
 )
 
 const (
@@ -152,4 +150,5 @@ const (
 	PatternProps
 	Defs
 	Raw
+	Ext // custom "x-" keyword: an inert Raw-like pair, acted on only in a Walk handler
 )

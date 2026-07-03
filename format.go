@@ -61,18 +61,10 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			if c.Op() == Raw {
+			if c.Op() == Raw || c.Op() == Ext {
 				w = s.lit(w, s.prog.code[c.Off()])
 				w = append(w, ':')
 				w = s.lit(w, s.prog.code[c.Off()+1])
-				continue
-			}
-
-			if c.Op() == CallExt {
-				w = append(w, `"x-`...)
-				w = append(w, s.xhooks[c.Arg()].name...)
-				w = append(w, '"', ':')
-				w = s.lit(w, s.prog.code[c.Off()])
 				continue
 			}
 

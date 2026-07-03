@@ -7,6 +7,27 @@ import (
 	"nikand.dev/go/json2"
 )
 
+type (
+	// Error is a schema failure the caller can show and classify: Message is a
+	// curated, user-safe sentence, Op is the offending keyword (None when none), and
+	// Off/End is its half-open span in the schema source. Err is the category
+	// sentinel, so errors.Is(err, ErrPattern) matches. Error keeps only what is safe
+	// to display; low-level causes (regexp, JSON offsets) are folded into Message
+	// when they help the user and dropped otherwise, never leaked through Err.
+	Error struct {
+		Message  string // user-facing detail, safe to display
+		Op       Opcode // offending keyword, None when none applies
+		Off, End int    // offending half-open span in the schema source
+		Err      error  // category sentinel: ErrKeyword / ErrPattern / ErrRef / ...
+	}
+
+	Diag struct {
+		Off, End int    // offending half-open span in the input (see cur.span)
+		Op       Opcode // failed keyword
+		Msg      string
+	}
+)
+
 // JSON-shape errors, reused from the decoder.
 var (
 	ErrSyntax       = json2.ErrSyntax       // not well-formed JSON
@@ -21,19 +42,6 @@ var (
 	ErrPattern        = errors.New("invalid pattern")       // pattern/patternProperties won't compile
 	ErrRef            = errors.New("unresolved ref")        // $ref/$anchor target missing or unloadable
 )
-
-// Error is a schema failure the caller can show and classify: Message is a
-// curated, user-safe sentence, Op is the offending keyword (None when none), and
-// Off/End is its half-open span in the schema source. Err is the category
-// sentinel, so errors.Is(err, ErrPattern) matches. Error keeps only what is safe
-// to display; low-level causes (regexp, JSON offsets) are folded into Message
-// when they help the user and dropped otherwise, never leaked through Err.
-type Error struct {
-	Message  string // user-facing detail, safe to display
-	Op       Opcode // offending keyword, None when none applies
-	Off, End int    // offending half-open span in the schema source
-	Err      error  // category sentinel: ErrKeyword / ErrPattern / ErrRef / ...
-}
 
 func (e *Error) Error() string { return e.Err.Error() + ": " + e.Message }
 func (e *Error) Unwrap() error { return e.Err }

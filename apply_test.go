@@ -547,25 +547,34 @@ func TestAdditionalRewrite(tb *testing.T) {
 func TestXHook(tb *testing.T) {
 	var rewriting bool
 
+	// The x-type:upper keyword is now an inert Ext node; a Walk handler detects it
+	// and uppercases the governed string value, replacing the old registered hook.
 	upper := func(c Applier, op, val Opcode) (Opcode, error) {
+		if op.Op() != Ext {
+			return c.Apply(op, val)
+		}
+
 		rewriting = c.Rewriting()
 
-		if c.Rewriting() && string(c.SchemaBuf().Span(op)) == `"upper"` && val.Op() == Str {
+		kids := c.SchemaBuf().Nodes(op)
+		key := string(c.SchemaBuf().String(kids[0]))
+		value := string(c.SchemaBuf().String(kids[1]))
+
+		if key == "x-type" && value == "upper" && c.Rewriting() && val.Op() == Str {
 			return c.Buf().Writer().Span(Str, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
 		}
 
 		return val, nil
 	}
 
-	// 1. end-to-end rewrite via the hook.
+	// 1. end-to-end rewrite via the Walk handler (no SetXHook).
 	var s Schema
-	s.SetXHook("type", upper)
 
 	if err := s.Compile([]byte(`{"properties":{"name":{"x-type":"upper"}}}`)); err != nil {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	out, _, err := s.Rewrite(nil, []byte(`{"name":"hi"}`))
+	out, _, err := s.WalkRewrite(nil, []byte(`{"name":"hi"}`), upper)
 	if err != nil {
 		tb.Fatalf("rewrite: %v", err)
 	}
@@ -574,20 +583,21 @@ func TestXHook(tb *testing.T) {
 		tb.Errorf("rewrite: got %q, want %q", got, `{"name":"HI"}`)
 	}
 
-	// 2. the x- keyword survives compile -> format via CallExt.
+	// 2. the x- keyword survives compile -> format (Ext round-trips).
 	if got := string(s.Format(nil)); got != `{"properties":{"name":{"x-type":"upper"}}}` {
 		tb.Errorf("format: got %q", got)
 	}
 
-	// 3. read-only: Validate is clean and the handler observes Rewriting()==false.
+	// 3. read-only: Walk is clean and the handler observes Rewriting()==false, so
+	// the value is not uppercased.
 	rewriting = true
 
-	if d, err := s.Validate([]byte(`{"name":"hi"}`)); err != nil || len(d) != 0 {
-		tb.Errorf("validate: err=%v diag=%v", err, d)
+	if d, err := s.Walk([]byte(`{"name":"hi"}`), upper); err != nil || len(d) != 0 {
+		tb.Errorf("walk: err=%v diag=%v", err, d)
 	}
 
 	if rewriting {
-		tb.Errorf("validate: handler saw Rewriting()==true")
+		tb.Errorf("walk: handler saw Rewriting()==true")
 	}
 }
 

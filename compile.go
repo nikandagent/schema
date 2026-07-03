@@ -13,11 +13,6 @@ type (
 		name string // full pointer, e.g. "#/$defs/Name"
 		root Opcode
 	}
-
-	hook struct {
-		name string // keyword suffix after "x-", e.g. "type"
-		h    Handler
-	}
 )
 
 const (
@@ -128,20 +123,6 @@ func (s *Schema) rootID() {
 			return
 		}
 	}
-}
-
-// SetXHook binds h to the custom keyword "x-"+name. When Compile meets that
-// keyword it compiles to a CallExt dispatching to h during Walk/Rewrite, instead
-// of keeping it as an inert Raw annotation. Register before Compile.
-func (s *Schema) SetXHook(name string, h Handler) {
-	for i := range s.xhooks {
-		if s.xhooks[i].name == name {
-			s.xhooks[i].h = h
-			return
-		}
-	}
-
-	s.xhooks = append(s.xhooks, hook{name: name, h: h})
 }
 
 func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
@@ -290,10 +271,6 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 	case "$defs", "definitions":
 		return s.kwDefs(name, b, st)
 	default:
-		if i, ok := s.hookXIndex(name); ok {
-			return s.kwHook(i, b, st)
-		}
-
 		return s.kwUnknown(name, b, kst, st)
 	}
 }
@@ -690,8 +667,15 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 	return makeNode(Defs, off, n), i, nil
 }
 
+// kwUnknown keeps a keyword we don't model as a pair node for round-trip: an Ext
+// for a custom "x-" keyword (a Walk handler can spot it and act), else an inert
+// Raw annotation. A non-"x-" unknown is rejected under SchemaRejectUnknown.
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
-	if !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown) {
+	op := Raw
+	switch {
+	case isExtKeyword(name):
+		op = Ext
+	case !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown):
 		return 0, st, serr(fmt.Sprintf("%q", name), None, kst, st-kst, ErrUnknownKeyword)
 	}
 
@@ -712,37 +696,12 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, key, val)
 
-	return makeNode(Raw, off, 2), i, nil
+	return makeNode(op, off, 2), i, nil
 }
 
-// kwHook compiles a hooked keyword to a CallExt: off → its value operand in the
-// program arena, arg → the hook index dispatched to at apply time.
-func (s *Schema) kwHook(i int, b []byte, st int) (Opcode, int, error) {
-	val, j, err := s.literal(b, st)
-	if err != nil {
-		return 0, j, err
-	}
-
-	off := len(s.prog.code)
-	s.prog.code = append(s.prog.code, val)
-
-	return makeNode(CallExt, off, i), j, nil
-}
-
-func (s *Schema) hookXIndex(name []byte) (int, bool) {
-	if len(name) < 3 || name[0] != 'x' || name[1] != '-' {
-		return 0, false
-	}
-
-	name = name[2:]
-
-	for i := range s.xhooks {
-		if s.xhooks[i].name == string(name) {
-			return i, true
-		}
-	}
-
-	return 0, false
+// isExtKeyword reports whether name is a custom "x-" keyword (x- plus a suffix).
+func isExtKeyword(name []byte) bool {
+	return len(name) >= 3 && name[0] == 'x' && name[1] == '-'
 }
 
 // checkRefs validates refs without any I/O: internal pointers must resolve now,
