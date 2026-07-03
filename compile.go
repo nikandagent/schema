@@ -28,6 +28,8 @@ const (
 	typeStr
 	typeArr
 	typeObj
+
+	typeErr
 )
 
 // Compile parses a schema document into a program.
@@ -246,15 +248,15 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 	case "default":
 		return s.kwValue(Default, b, st)
 	case "minimum":
-		return s.kwValue(Minimum, b, st)
+		return s.kwNum(Minimum, b, st)
 	case "maximum":
-		return s.kwValue(Maximum, b, st)
+		return s.kwNum(Maximum, b, st)
 	case "exclusiveMinimum":
-		return s.kwValue(ExclMin, b, st)
+		return s.kwNum(ExclMin, b, st)
 	case "exclusiveMaximum":
-		return s.kwValue(ExclMax, b, st)
+		return s.kwNum(ExclMax, b, st)
 	case "multipleOf":
-		return s.kwValue(MultipleOf, b, st)
+		return s.kwNum(MultipleOf, b, st)
 	case "items":
 		return s.kwSub(Items, b, st)
 	case "additionalProperties":
@@ -336,7 +338,28 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 		return 0, i, serr(`"type" must be a string or array of type names`, Type, st, i-st, ErrKeyword)
 	}
 
+	if mask&typeErr != 0 {
+		return 0, i, serr(`"type" contains an unknown type name`, Type, st, i-st, ErrKeyword)
+	}
+
 	return makeImm(Type, mask), i, nil
+}
+
+// enterKind opens a container-keyword value, returning a curated ErrKeyword when
+// the value isn't the expected object/array instead of json2's raw type error.
+func (s *Schema) enterKind(b []byte, st int, typ json2.Type, op Opcode, want string) (int, error) {
+	var d json2.Iterator
+
+	tp, i, err := d.Type(b, st)
+	if err != nil {
+		return i, err
+	}
+
+	if tp != typ {
+		return i, serr(fmt.Sprintf("%q must be %s", keywordName(op), want), op, st, i-st, ErrKeyword)
+	}
+
+	return d.Enter(b, st, typ)
 }
 
 func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
@@ -345,7 +368,7 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 
 	var d json2.Iterator
 
-	i, err := d.Enter(b, st, json2.Object)
+	i, err := s.enterKind(b, st, json2.Object, Properties, "an object")
 	if err != nil {
 		return 0, i, err
 	}
@@ -384,7 +407,7 @@ func (s *Schema) kwPatternProps(b []byte, st int) (Opcode, int, error) {
 
 	var d json2.Iterator
 
-	i, err := d.Enter(b, st, json2.Object)
+	i, err := s.enterKind(b, st, json2.Object, PatternProps, "an object")
 	if err != nil {
 		return 0, i, err
 	}
@@ -421,7 +444,7 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	var d json2.Iterator
 
-	i, err := d.Enter(b, st, json2.Array)
+	i, err := s.enterKind(b, st, json2.Array, op, "an array")
 	if err != nil {
 		return 0, i, err
 	}
@@ -429,9 +452,15 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 	var val Opcode
 
 	for d.ForMore(b, &i, json2.Array, &err) {
+		est := i
+
 		val, i, err = s.literal(b, i)
 		if err != nil {
 			return 0, i, err
+		}
+
+		if op == Required && val.Op() != Str {
+			return 0, i, serr(`"required" entries must be strings`, Required, est, i-est, ErrKeyword)
 		}
 
 		s.prog.tmp = append(s.prog.tmp, val)
@@ -453,7 +482,7 @@ func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	var d json2.Iterator
 
-	i, err := d.Enter(b, st, json2.Array)
+	i, err := s.enterKind(b, st, json2.Array, op, "an array")
 	if err != nil {
 		return 0, i, err
 	}
@@ -495,6 +524,25 @@ func (s *Schema) kwValue(op Opcode, b []byte, st int) (Opcode, int, error) {
 	val, i, err := s.literal(b, st)
 	if err != nil {
 		return 0, i, err
+	}
+
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, val)
+
+	return makeNode(op, off, 1), i, nil
+}
+
+// kwNum is kwValue for numeric keywords: the value must be a JSON number, so a
+// typo like {"minimum":"x"} is a curated ErrKeyword instead of a silently-zero
+// bound. The decoder already classifies the literal, so val.Op() is the check.
+func (s *Schema) kwNum(op Opcode, b []byte, st int) (Opcode, int, error) {
+	val, i, err := s.literal(b, st)
+	if err != nil {
+		return 0, i, err
+	}
+
+	if val.Op() != Num {
+		return 0, i, serr(fmt.Sprintf("%q must be a number", keywordName(op)), op, st, i-st, ErrKeyword)
 	}
 
 	off := len(s.prog.code)
@@ -608,7 +656,7 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 	var d json2.Iterator
 
-	i, err := d.Enter(b, st, json2.Object)
+	i, err := s.enterKind(b, st, json2.Object, Defs, "an object")
 	if err != nil {
 		return 0, i, err
 	}
@@ -845,14 +893,7 @@ func (s *Schema) fragTarget(frag string) Opcode {
 }
 
 func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {
-	bf := Buffer{code: s.prog.code, src: b, tmp: s.prog.tmp}
-
-	val, i, err := bf.value(b, st, false)
-
-	s.prog.code = bf.code
-	s.prog.tmp = bf.tmp
-
-	return val, i, err
+	return s.prog.value(b, st, false)
 }
 
 func typeBit(name []byte) int {
@@ -872,7 +913,7 @@ func typeBit(name []byte) int {
 	case "object":
 		return typeObj
 	default:
-		return 0
+		return typeErr
 	}
 }
 

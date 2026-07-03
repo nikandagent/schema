@@ -118,6 +118,79 @@ func TestError(tb *testing.T) {
 	}
 }
 
+func TestKeywordTypeErrors(tb *testing.T) {
+	for _, tc := range []struct {
+		in  string
+		msg string
+	}{
+		{`{"type":"qweqwe"}`, `"type" contains an unknown type name`},
+		{`{"type":["object","qweqwe"]}`, `"type" contains an unknown type name`},
+
+		{`{"minimum":"abc"}`, `"minimum" must be a number`},
+		{`{"minimum":true}`, `"minimum" must be a number`},
+		{`{"maximum":[1]}`, `"maximum" must be a number`},
+		{`{"exclusiveMinimum":{}}`, `"exclusiveMinimum" must be a number`},
+		{`{"exclusiveMaximum":"x"}`, `"exclusiveMaximum" must be a number`},
+		{`{"multipleOf":"x"}`, `"multipleOf" must be a number`},
+
+		{`{"required":[1,2]}`, `"required" entries must be strings`},
+		{`{"required":"name"}`, `"required" must be an array`},
+		{`{"enum":5}`, `"enum" must be an array`},
+		{`{"properties":123}`, `"properties" must be an object`},
+		{`{"patternProperties":1}`, `"patternProperties" must be an object`},
+		{`{"$defs":1}`, `"$defs" must be an object`},
+		{`{"allOf":1}`, `"allOf" must be an array`},
+		{`{"anyOf":"x"}`, `"anyOf" must be an array`},
+		{`{"oneOf":true}`, `"oneOf" must be an array`},
+	} {
+		var s Schema
+
+		err := s.Compile([]byte(tc.in))
+		if err == nil {
+			tb.Errorf("compile %q: want error", tc.in)
+			continue
+		}
+
+		var e *Error
+		if !errors.As(err, &e) {
+			tb.Errorf("compile %q: err %v (%T) is not *Error", tc.in, err, err)
+			continue
+		}
+
+		if !errors.Is(err, ErrKeyword) {
+			tb.Errorf("compile %q: err %v, want Is(ErrKeyword)", tc.in, err)
+		}
+		if e.Message == "" {
+			tb.Errorf("compile %q: empty Message", tc.in)
+		}
+		if e.Message != tc.msg {
+			tb.Errorf("compile %q: Message %q, want %q", tc.in, e.Message, tc.msg)
+		}
+	}
+}
+
+func TestKeywordTypeValid(tb *testing.T) {
+	for _, in := range []string{
+		`{"minimum":0}`,
+		`{"maximum":1.5}`,
+		`{"exclusiveMinimum":-3}`,
+		`{"multipleOf":2}`,
+		`{"required":["a","b"]}`,
+		`{"enum":[1,"x",true,null]}`,
+		`{"properties":{"a":{"type":"string"}}}`,
+		`{"allOf":[{"type":"string"}]}`,
+		`{"$defs":{"A":{"type":"integer"}}}`,
+		`{"const":"anything"}`,
+		`{"default":[1,2]}`,
+	} {
+		var s Schema
+
+		if err := s.Compile([]byte(in)); err != nil {
+			tb.Errorf("compile %q: unexpected error: %v", in, err)
+		}
+	}
+}
+
 func TestCompileError(tb *testing.T) {
 	for _, in := range []string{
 		`123`,
