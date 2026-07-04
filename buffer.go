@@ -29,22 +29,18 @@ type (
 func (b *Buffer) Reader() BufferReader { return BufferReader{b} }
 func (b *Buffer) Writer() BufferWriter { return BufferWriter{b} }
 
-func (b BufferWriter) FromJSON(r []byte) (Opcode, error) {
-	return b.Buffer.valueFull(r, true)
-}
-
-func (b BufferWriter) DecodeJSON(r []byte, st int) (Opcode, int, error) {
-	return b.value(r, st, true)
-}
-
-func (b *Buffer) decode(r []byte) (Opcode, error) {
-	b.src = r
+func (b *Buffer) Reset() {
 	b.code = b.code[:0]
 	b.text = b.text[:0]
+	b.tmp = b.tmp[:0]
 
 	if b.text == nil {
 		b.text = b.textbuf[:]
 	}
+}
+
+func (b *Buffer) decode(r []byte) (Opcode, error) {
+	b.src = r
 
 	return b.valueFull(r, false)
 }
@@ -179,6 +175,14 @@ func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
 	return b.Writer().Nodes(Object, b.tmp[mark:], st, i), i, nil
 }
 
+func (b BufferWriter) FromJSON(r []byte) (Opcode, error) {
+	return b.Buffer.valueFull(r, true)
+}
+
+func (b BufferWriter) DecodeJSON(r []byte, st int) (Opcode, int, error) {
+	return b.value(r, st, true)
+}
+
 func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
 	off := len(b.src) + len(b.text)
 	b.text = append(b.text, s...)
@@ -309,8 +313,10 @@ func (b BufferReader) Span(op Opcode) []byte {
 
 func (b BufferReader) span(op Opcode) (off, end int) {
 	switch op.Op() {
-	case Num, Str, Null, False, True, Pattern, Ref:
+	case Num, Str, Null, False, True, Pattern, Ref, Key:
 		return op.SpanInt()
+	case None:
+		return 0, 0
 	case Object, Array:
 	default:
 		panic(op.Op())
@@ -380,35 +386,3 @@ func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
 	buf, _, err := d.DecodeString(sp, 0, buf)
 	return buf, err
 }
-
-func makeNode(op Opcode, off, n int) Opcode {
-	if off < 0 || off > maxOff {
-		panic(off)
-	}
-	if n < 0 || n > maxArg {
-		panic(n)
-	}
-
-	return op | Opcode(n)<<argShift | Opcode(off)<<offShift
-}
-
-func makeImm(op Opcode, v int) Opcode {
-	if v < 0 || v > maxImm {
-		panic(v)
-	}
-
-	return op | Opcode(v)<<argShift
-}
-
-func (op Opcode) Op() Opcode { return op & opMask }
-func (op Opcode) Imm() int64 { return int64(op >> argShift & immMask) }
-func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
-func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
-
-// OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
-// lengths; the payload fields are far below math.MaxInt on any real program.
-func (op Opcode) OffInt() int { return int(op.Off()) }
-func (op Opcode) ArgInt() int { return int(op.Arg()) }
-func (op Opcode) ImmInt() int { return int(op.Imm()) }
-
-func (op Opcode) SpanInt() (off, end int) { off = op.OffInt(); return off, off + op.ArgInt() }

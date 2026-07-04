@@ -81,7 +81,8 @@ const (
 	// field == its mask-k means the real value continues in the next opcode).
 	maxArg = argMask - 4
 	maxOff = offMask - 4
-	maxImm = immMask - 4
+	maxImm = immMask>>1 - 4
+	minImm = -(immMask>>1 + 1)
 )
 
 const (
@@ -105,10 +106,11 @@ const (
 	MaxProps
 	Canon
 
-	None    // no keyword; Error.Op when a failure isn't tied to one
-	IntLit  // integer literal: a data-path array index
-	SrcOff  // 56-bit source offset parked before a container (point / overflow)
-	SrcSpan // source span (off:32 | len:24) parked before a container's nodes
+	None
+	IntLit
+	SrcOff
+	SrcSpan
+	Each
 
 	bad // internal: unresolved ref/anchor target
 )
@@ -118,6 +120,7 @@ const (
 	Str
 	Pattern
 
+	Key
 	Ref
 )
 
@@ -152,3 +155,35 @@ const (
 	Raw
 	Ext // custom "x-" keyword: an inert Raw-like pair, acted on only in a Walk handler
 )
+
+func makeNode(op Opcode, off, n int) Opcode {
+	if off < 0 || off > maxOff {
+		panic(off)
+	}
+	if n < 0 || n > maxArg {
+		panic(n)
+	}
+
+	return op | Opcode(n)<<argShift | Opcode(off)<<offShift
+}
+
+func makeImm(op Opcode, v int) Opcode {
+	if v < minImm || v > maxImm {
+		panic(v)
+	}
+
+	return op | Opcode(v)<<argShift
+}
+
+func (op Opcode) Op() Opcode { return op & opMask }
+func (op Opcode) Imm() int64 { return int64(op) >> argShift }
+func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
+func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
+
+// OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
+// lengths; the payload fields are far below math.MaxInt on any real program.
+func (op Opcode) OffInt() int { return int(op.Off()) }
+func (op Opcode) ArgInt() int { return int(op.Arg()) }
+func (op Opcode) ImmInt() int { return int(op.Imm()) }
+
+func (op Opcode) SpanInt() (off, end int) { off = op.OffInt(); return off, off + op.ArgInt() }

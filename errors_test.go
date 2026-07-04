@@ -224,8 +224,8 @@ func TestFormatNicely(tb *testing.T) {
 	{
 		data := `{"tags":[1]}`
 		d := one(`{"properties":{"tags":{"type":"array","minItems":2}}}`, data)
-		if d.Msg != "too few items" {
-			tb.Fatalf("C: base message %q, want %q", d.Msg, "too few items")
+		if d.Message != "too few items" {
+			tb.Fatalf("C: base message %q, want %q", d.Message, "too few items")
 		}
 
 		got := string(d.FormatNicelyContext(nil, []byte(data), 50, 50))
@@ -271,19 +271,19 @@ func TestFormatNicely(tb *testing.T) {
 
 	// E. Clamping and oversized context must not panic.
 	{
-		got := string(Diag{Off: 0, End: 0, Msg: "no location"}.FormatNicelyContext(nil, nil, 5, 5))
+		got := string(Diag{Off: 0, End: 0, Message: "no location"}.FormatNicelyContext(nil, nil, 5, 5))
 		if !strings.Contains(got, "^ No location") {
 			tb.Errorf("E empty: %q", got)
 		}
 
-		got = string(Diag{Off: 2, End: 100, Msg: "past end"}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
+		got = string(Diag{Off: 2, End: 100, Message: "past end"}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
 		if !strings.Contains(got, "^ Past end") {
 			tb.Errorf("E overrun: %q", got)
 		}
 
 		// Large before/after on a short src: caret indent stays small because start
 		// clamps to 0, so pad never approaches the 128-wide spaces constant.
-		got = string(Diag{Off: 1, End: 2, Msg: "wide"}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
+		got = string(Diag{Off: 1, End: 2, Message: "wide"}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
 		lines := strings.SplitN(got, "\n", 2)
 		if indent := strings.IndexByte(lines[1], '^'); indent != 1 {
 			tb.Errorf("E wide: caret indent %d, want 1 (stayed within 128): %q", indent, got)

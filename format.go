@@ -43,6 +43,15 @@ func appendRef(w, p []byte) []byte {
 	return append(w, p...)
 }
 
+func (s *Schema) dump(w []byte, op Opcode) []byte {
+	switch op.Op() {
+	case Pass, Fail, All:
+		return s.format(w, op)
+	default:
+		return s.constraint(w, op)
+	}
+}
+
 func (s *Schema) format(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Pass:

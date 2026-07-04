@@ -10,39 +10,29 @@ import (
 
 type (
 	cur struct {
-		s *Schema // program
-		b *Buffer // decoded data (reused &s.b)
+		s *Schema
+		b *Buffer
 
-		h Handler // Walk override, nil for Validate/Rewrite
+		h Handler
 
 		rewrite bool
 		diag    []Diag
 
 		spath []Opcode
 		dpath []Opcode
+
+		at []Opcode
 	}
 
-	// Handler runs in place of the default apply for a node during Walk and
-	// WalkRewrite. Return the (possibly rewritten) value; call c.Apply to
-	// delegate to the default. Walk ignores the returned value. Return ErrBreak
-	// to stop the walk cleanly.
 	Handler = func(c Applier, op, val Opcode) (Opcode, error)
 
-	// Applier is the engine a Handler talks to. cur implements it; it is an
-	// interface so cur stays free to change without breaking handlers.
 	Applier interface {
 		Apply(op, val Opcode) (Opcode, error)
 		Fail(op, val Opcode, msg string)
-		Buf() *Buffer            // data arena (the value side, read+write)
-		SchemaBuf() BufferReader // program arena (the op side, read-only)
-		Rewriting() bool         // false under Validate/Walk (returned value ignored)
+		Buf() *Buffer
+		SchemaBuf() BufferReader
+		Rewriting() bool
 
-		// DataPath/SchemaPath are the descent from the root to the current node,
-		// one step per object member or array element (allOf/anyOf/$ref stay put,
-		// so len is the data depth: 0 at the root). A DataPath step is the data
-		// key (a Str node) or the array index (an IntLit); the matching SchemaPath
-		// step is the subschema applied there. Both are valid only for the
-		// duration of the handler call.
 		DataPath() []Opcode
 		SchemaPath() []Opcode
 	}
@@ -51,55 +41,57 @@ type (
 // ErrBreak is returned by a Handler to stop the walk cleanly.
 var ErrBreak = errors.New("break")
 
-func (s *Schema) Validate(r []byte) ([]Diag, error) {
-	return s.Walk(r, nil)
+func (s *Schema) Validate(doc []byte, opts ...Option) ([]Diag, error) {
+	return s.Walk(doc, nil, opts...)
 }
 
-func (s *Schema) Rewrite(w, r []byte) ([]byte, []Diag, error) {
-	return s.WalkRewrite(w, r, nil)
+func (s *Schema) Rewrite(w, doc []byte, opts ...Option) ([]byte, []Diag, error) {
+	return s.WalkRewrite(w, doc, nil, opts...)
 }
 
-// Walk traverses the schema against the data without mutating it, running h at
-// each node (nil h is the default validator). h's returned value is ignored.
-func (s *Schema) Walk(r []byte, h Handler) ([]Diag, error) {
-	c := cur{
-		s: s,
-		b: &s.b,
-		h: h,
-	}
+func (s *Schema) Walk(doc []byte, h Handler, opts ...Option) ([]Diag, error) {
+	_, diag, err := s.walk(doc, h, false, opts...)
 
-	root, err := c.b.decode(r)
+	return diag, err
+}
+
+func (s *Schema) WalkRewrite(w, doc []byte, h Handler, opts ...Option) ([]byte, []Diag, error) {
+	res, diag, err := s.walk(doc, h, true, opts...)
 	if err != nil {
-		return nil, err
+		return w, diag, err
+	}
+	if res == None {
+		return w, diag, nil
 	}
 
-	_, err = c.apply(s.root, root)
-
-	return c.diag, c.result(err)
+	return s.b.Reader().AppendJSON(w, res), diag, nil
 }
 
-// WalkRewrite is Walk that encodes the (possibly rewritten) value to w. nil h is
-// the default rewriter.
-func (s *Schema) WalkRewrite(w, r []byte, h Handler) ([]byte, []Diag, error) {
+func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (Opcode, []Diag, error) {
+	s.b.Reset()
+
 	c := cur{
 		s:       s,
 		b:       &s.b,
 		h:       h,
-		rewrite: true,
+		rewrite: rewrite,
 	}
 
-	root, err := c.b.decode(r)
+	root, err := c.b.decode(doc)
 	if err != nil {
-		return w, nil, err
+		return None, nil, err
 	}
 
-	out, err := c.apply(s.root, root)
-
-	if e := c.result(err); e != nil {
-		return w, c.diag, e
+	for _, o := range opts {
+		err := o(&c)
+		if err != nil {
+			return None, nil, err
+		}
 	}
 
-	return c.b.Reader().AppendJSON(w, out), c.diag, nil
+	res, err := c.apply(s.root, root)
+
+	return res, c.diag, c.result(err)
 }
 
 // Two arenas, walked in parallel but never interlinked — each node's spans
@@ -137,30 +129,21 @@ func (c *cur) Rewriting() bool         { return c.rewrite }
 func (c *cur) DataPath() []Opcode   { return c.dpath }
 func (c *cur) SchemaPath() []Opcode { return c.spath }
 
-// applyChild applies sub to a member/element value while the descent is on the
-// path: sub joins spath, step (a Str key node or an IntLit index) joins dpath.
-// The defer pops both even if apply panics.
 func (c *cur) applyChild(sub, val, step Opcode) (Opcode, error) {
-	c.push(sub, step)
-	defer c.pop()
+	mark := len(c.spath)
+
+	c.spath = append(c.spath, sub)
+	c.dpath = append(c.dpath, step)
+
+	defer func() {
+		c.spath = c.spath[:mark]
+		c.dpath = c.dpath[:mark]
+	}()
 
 	return c.apply(sub, val)
 }
 
-func (c *cur) push(sub, step Opcode) {
-	c.spath = append(c.spath, sub)
-	c.dpath = append(c.dpath, step)
-}
-
-func (c *cur) pop() {
-	c.spath = c.spath[:len(c.spath)-1]
-	c.dpath = c.dpath[:len(c.dpath)-1]
-}
-
 func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
-	// Type-specific keywords are guarded on the value's type: per spec a keyword
-	// that doesn't apply to the instance type imposes no constraint (it passes).
-	// Only Type constrains the type itself.
 	switch op.Op() {
 	case Pass:
 	case Fail:
@@ -314,6 +297,18 @@ func (c *cur) checkType(op, val Opcode) {
 }
 
 func (c *cur) checkProps(op, val Opcode) (Opcode, error) {
+	seek := c.seeking()
+
+	switch seek.Op() {
+	case None, Key, Each:
+		// ok
+	case IntLit:
+		c.Fail(op, None, "schema is object, val supposes array")
+		return val, nil
+	default:
+		panic(seek)
+	}
+
 	if val.Op() != Object {
 		return val, nil
 	}
@@ -326,16 +321,24 @@ func (c *cur) checkProps(op, val Opcode) (Opcode, error) {
 }
 
 func (c *cur) validateProps(op, val Opcode) error {
+	seek := c.seeking()
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
 		name := c.s.prog.code[off+2*i]
 		sub := c.s.prog.code[off+2*i+1]
 
-		if key, v, ok := c.member(val, name); ok {
-			if _, err := c.applyChild(sub, v, key); err != nil {
-				return err
-			}
+		if seek.Op() == Key && !c.idEq(seek, name) {
+			continue
+		}
+
+		key, v, ok := c.member(val, name)
+		if !ok {
+			continue
+		}
+
+		if _, err := c.applyChild(sub, v, key); err != nil {
+			return err
 		}
 	}
 
@@ -527,6 +530,10 @@ func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
 			continue
 		}
 
+		if !c.memberSought(key) {
+			continue
+		}
+
 		if _, err := c.applyChild(sub, v, key); err != nil {
 			return err
 		}
@@ -613,6 +620,11 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 		key := c.b.code[voff+2*i]
 		v := c.b.code[voff+2*i+1]
 
+		if !c.memberSought(key) {
+			c.b.tmp = append(c.b.tmp, key, v)
+			continue
+		}
+
 		for j := range n {
 			pat := c.s.prog.code[off+2*j]
 			sub := c.s.prog.code[off+2*j+1]
@@ -643,6 +655,10 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 }
 
 func (c *cur) checkRequired(op, val Opcode) {
+	if c.seeking() != None {
+		return
+	}
+
 	if val.Op() != Object {
 		return
 	}
@@ -661,6 +677,18 @@ func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 		return val, nil
 	}
 
+	seek := c.seeking()
+
+	switch seek.Op() {
+	case None, Each, IntLit:
+		// ok
+	case Key:
+		c.Fail(op, None, "schema is array, val supposes object")
+		return val, nil
+	default:
+		panic(seek)
+	}
+
 	mark := len(c.b.tmp)
 	defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
@@ -668,7 +696,16 @@ func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 	voff, vn := val.Off(), val.Arg()
 	dirty := false
 
+	target := seek.Imm()
+	if target < 0 {
+		target += vn
+	}
+
 	for i := range vn {
+		if seek.Op() == IntLit && i != target {
+			continue
+		}
+
 		v := c.b.code[voff+i]
 
 		nv, err := c.applyChild(sub, v, makeImm(IntLit, int(i)))
@@ -788,6 +825,23 @@ func (c *cur) keyEq(data, schema Opcode) bool {
 	return bytes.Equal(c.b.Reader().Span(data), c.s.prog.Reader().Span(schema))
 }
 
+func (c *cur) idEq(id, schema Opcode) bool {
+	return bytes.Equal(c.b.Reader().Span(id), c.s.prog.Reader().String(schema))
+}
+
+func (c *cur) memberSought(key Opcode) bool {
+	seek := c.seeking()
+
+	switch seek.Op() {
+	case None, Each:
+		return true
+	case Key:
+		return bytes.Equal(c.b.Reader().Span(seek), c.b.Reader().String(key))
+	default:
+		return false
+	}
+}
+
 func (c *cur) equalLit(val, lit Opcode) bool {
 	return equalBuf(c.b.Reader(), val, c.s.prog.Reader(), lit)
 }
@@ -817,7 +871,7 @@ func (c *cur) strlen(val Opcode) int64 {
 
 func (c *cur) Fail(op, val Opcode, msg string) {
 	off, end := c.b.Reader().span(val)
-	c.diag = append(c.diag, Diag{Off: off, End: end, Op: op.Op(), Msg: msg})
+	c.diag = append(c.diag, Diag{Off: off, End: end, Op: op.Op(), Message: msg})
 }
 
 // result reports only real failures — a broken document, a handler error, a
@@ -829,6 +883,14 @@ func (c *cur) result(err error) error {
 	}
 
 	return err
+}
+
+func (c *cur) seeking() Opcode {
+	if len(c.dpath) < len(c.at) {
+		return c.at[len(c.dpath)]
+	}
+
+	return None
 }
 
 func dataType(val Opcode) int {

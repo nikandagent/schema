@@ -253,7 +253,7 @@ func TestWalk(tb *testing.T) {
 		return val, ErrBreak
 	}
 
-	if d, err := s.Walk([]byte(`"x"`), rep); err != nil || len(d) != 1 || d[0].Msg != "handler says no" {
+	if d, err := s.Walk([]byte(`"x"`), rep); err != nil || len(d) != 1 || d[0].Message != "handler says no" {
 		tb.Errorf("Fail: err=%v diag=%+v", err, d)
 	}
 }

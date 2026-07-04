@@ -8,39 +8,33 @@ import (
 )
 
 type (
-	// Error is a schema failure the caller can show and classify: Message is a
-	// curated, user-safe sentence, Op is the offending keyword (None when none), and
-	// Off/End is its half-open span in the schema source. Err is the category
-	// sentinel, so errors.Is(err, ErrPattern) matches. Error keeps only what is safe
-	// to display; low-level causes (regexp, JSON offsets) are folded into Message
-	// when they help the user and dropped otherwise, never leaked through Err.
 	Error struct {
-		Message  string // user-facing detail, safe to display
-		Op       Opcode // offending keyword, None when none applies
-		Off, End int    // offending half-open span in the schema source
-		Err      error  // category sentinel: ErrKeyword / ErrPattern / ErrRef / ...
+		Message  string
+		Off, End int
+		Op       Opcode
+		Err      error
 	}
 
 	Diag struct {
-		Off, End int    // offending half-open span in the input (see cur.span)
-		Op       Opcode // failed keyword
-		Msg      string
+		Message  string
+		Off, End int
+		Op       Opcode
 	}
 )
 
 // JSON-shape errors, reused from the decoder.
 var (
-	ErrSyntax       = json2.ErrSyntax       // not well-formed JSON
-	ErrTrailingData = json2.ErrTrailingData // extra bytes after the value
+	ErrSyntax       = json2.ErrSyntax
+	ErrTrailingData = json2.ErrTrailingData
 )
 
 // Schema error categories. Each concrete failure is an *Error whose Err is one
 // of these, so errors.Is(err, ErrKeyword) still classifies it.
 var (
-	ErrKeyword        = errors.New("invalid keyword value") // wrong type/shape/range for a keyword
-	ErrUnknownKeyword = errors.New("unknown keyword")       // under SchemaRejectUnknown
-	ErrPattern        = errors.New("invalid pattern")       // pattern/patternProperties won't compile
-	ErrRef            = errors.New("unresolved ref")        // $ref/$anchor target missing or unloadable
+	ErrKeyword        = errors.New("invalid keyword value")
+	ErrUnknownKeyword = errors.New("unknown keyword")
+	ErrPattern        = errors.New("invalid pattern")
+	ErrRef            = errors.New("unresolved ref")
 )
 
 func (e *Error) Error() string { return e.Err.Error() + ": " + e.Message }
@@ -104,12 +98,12 @@ func (d Diag) FormatNicelyContext(w, src []byte, before, after int) []byte {
 
 	w = append(w, spaces[:pad]...)
 	w = append(w, '^', ' ')
-	w = appendCapitalized(w, d.Msg)
+	w = appendCapitalized(w, d.Message)
 
 	return append(w, '\n')
 }
 
-const spaces = "                                                                                                                                " // 128 spaces, for caret padding
+const spaces = "                                                                                                                                "
 
 // appendCapitalized appends s with its first ASCII letter upper-cased.
 func appendCapitalized(w []byte, s string) []byte {
@@ -143,9 +137,9 @@ func (e Invalid) Error() string {
 	case 0:
 		return "invalid document"
 	case 1:
-		return "invalid document: " + e[0].Msg
+		return "invalid document: " + e[0].Message
 	default:
-		return fmt.Sprintf("invalid document: %s (+%d more)", e[0].Msg, len(e)-1)
+		return fmt.Sprintf("invalid document: %s (+%d more)", e[0].Message, len(e)-1)
 	}
 }
 
