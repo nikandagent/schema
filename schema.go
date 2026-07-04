@@ -34,10 +34,11 @@ type (
 )
 
 const (
-	SchemaKeepOrder     Flags = 1 << iota // keep authored keyword & required order, don't canonicalize
-	SchemaRejectUnknown                   // reject unknown keywords instead of keeping them (spec keeps)
-	KeepKeyOrder                          // keep input object-key order, don't reorder to properties
-	KeepMissing                           // keep missing properties absent, don't fill defaults
+	SchemaKeepOrder         Flags = 1 << iota // keep authored keyword & required order, don't canonicalize
+	SchemaRejectUnknown                       // reject unknown keywords instead of keeping them (spec keeps)
+	SchemaRejectUnsupported                   // reject recognized-but-unimplemented keywords (if, contains, ...)
+	KeepKeyOrder                              // keep input object-key order, don't reorder to properties
+	KeepMissing                               // keep missing properties absent, don't fill defaults
 )
 
 // DataPreserve rewrites data without changing its content: no reordering and no

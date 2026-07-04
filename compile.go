@@ -2,7 +2,9 @@ package schema
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"nikand.dev/go/json2"
@@ -536,12 +538,27 @@ func (s *Schema) kwImm(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	n, err := json2.Value(raw).Int()
-	if err != nil {
+	n, ok := integerValue(raw)
+	if !ok {
 		return 0, i, serr(fmt.Sprintf("%q must be an integer", keywordName(op)), op, st, i-st, ErrKeyword)
 	}
 
 	return makeImm(op, n), i, nil
+}
+
+// integerValue reads a JSON number that denotes an integer, accepting an
+// integer-valued decimal like 2.0 (which the spec treats as 2).
+func integerValue(raw []byte) (int, bool) {
+	if n, err := json2.Value(raw).Int(); err == nil {
+		return n, true
+	}
+
+	f, err := json2.Value(raw).Float64()
+	if err != nil || f != math.Trunc(f) {
+		return 0, false
+	}
+
+	return int(f), true
 }
 
 func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
@@ -669,13 +686,21 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 // kwUnknown keeps a keyword we don't model as a pair node for round-trip: an Ext
 // for a custom "x-" keyword (a Walk handler can spot it and act), else an inert
-// Raw annotation. A non-"x-" unknown is rejected under SchemaRejectUnknown.
+// Raw annotation. A recognized-but-unimplemented keyword is rejected under
+// SchemaRejectUnsupported (ErrUnsupported); a genuine unknown under
+// SchemaRejectUnknown (ErrUnknownKeyword).
 func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	op := Raw
 	switch {
 	case isExtKeyword(name):
 		op = Ext
-	case !knownKeyword(name) && s.Flags.Is(SchemaRejectUnknown):
+	case unsupportedKeyword(name):
+		if s.Flags.Is(SchemaRejectUnsupported) {
+			return 0, st, serr(fmt.Sprintf("%q", name), None, kst, st-kst, ErrUnsupported)
+		}
+	case annotationKeyword(name):
+		// inert even under strict: a legit no-op in our vocabulary
+	case s.Flags.Is(SchemaRejectUnknown):
 		return 0, st, serr(fmt.Sprintf("%q", name), None, kst, st-kst, ErrUnknownKeyword)
 	}
 
@@ -848,6 +873,8 @@ func (s *Schema) fragTarget(frag string) Opcode {
 		}
 	}
 
+	strconv.Atoi("qwe")
+
 	return bad
 }
 
@@ -876,23 +903,35 @@ func typeBit(name []byte) int {
 	}
 }
 
-func knownKeyword(name []byte) bool {
+// unsupportedKeyword reports whether name is a real 2020-12 assertion keyword we
+// don't implement yet — kept inert for round-trip, but rejected with
+// ErrUnsupported under SchemaRejectUnsupported.
+func unsupportedKeyword(name []byte) bool {
 	switch string(name) {
-	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
-		"title", "description", "examples", "readOnly", "writeOnly", "deprecated":
-		return true
-	case "if", "then", "else", "contains", "minContains", "maxContains",
+	case "if", "then", "else",
+		"contains", "minContains", "maxContains",
 		"propertyNames", "prefixItems",
 		"dependentSchemas", "dependentRequired", "dependencies",
-		"unevaluatedItems", "unevaluatedProperties":
-		return true
-	case "format", "contentEncoding", "contentMediaType", "contentSchema":
-		return true
-	case "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor":
+		"unevaluatedItems", "unevaluatedProperties",
+		"$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor":
 		return true
 	}
 
-	return len(name) >= 2 && name[0] == 'x' && name[1] == '-'
+	return false
+}
+
+// annotationKeyword reports whether name is a known keyword that is a legitimate
+// no-op in our vocabulary (metadata, or annotation-only under 2020-12) — kept
+// inert even under strict flags.
+func annotationKeyword(name []byte) bool {
+	switch string(name) {
+	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
+		"title", "description", "examples", "readOnly", "writeOnly", "deprecated",
+		"format", "contentEncoding", "contentMediaType", "contentSchema":
+		return true
+	}
+
+	return false
 }
 
 var keywordOrder = []Opcode{

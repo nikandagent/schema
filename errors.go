@@ -33,6 +33,7 @@ var (
 var (
 	ErrKeyword        = errors.New("invalid keyword value")
 	ErrUnknownKeyword = errors.New("unknown keyword")
+	ErrUnsupported    = errors.New("unsupported keyword")
 	ErrPattern        = errors.New("invalid pattern")
 	ErrRef            = errors.New("unresolved ref")
 )

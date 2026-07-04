@@ -210,8 +210,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 			c.Fail(op, val, "not below exclusive maximum")
 		}
 	case MultipleOf:
-		m := c.schemaNum(op)
-		if val.Op() == Num && m != 0 && math.Mod(c.number(val), m) != 0 {
+		if val.Op() == Num && !c.multipleOf(op, val) {
 			c.Fail(op, val, "not a multiple")
 		}
 	case Enum:
@@ -857,6 +856,18 @@ func (c *cur) schemaNum(op Opcode) float64 {
 	return v
 }
 
+func (c *cur) multipleOf(op, val Opcode) bool {
+	lit := c.s.prog.code[op.Off()]
+
+	ok, exact := isMultiple(c.b.Reader().Span(val), c.s.prog.Reader().Span(lit))
+	if exact {
+		return ok
+	}
+
+	m := c.schemaNum(op)
+	return m == 0 || math.Mod(c.number(val), m) == 0
+}
+
 func (c *cur) integral(val Opcode) bool {
 	v := c.number(val)
 	return v == math.Trunc(v)
@@ -950,8 +961,11 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 			return false
 		}
 
-		for i := range 2 * ln {
-			if !equalBuf(lb, lb.code[lo+i], rb, rb.code[ro+i]) {
+		for i := range ln {
+			lk := lb.code[lo+2*i]
+			lv := lb.code[lo+2*i+1]
+
+			if objCount(lb, lo, ln, lb, lk, lv) != objCount(rb, ro, rn, lb, lk, lv) {
 				return false
 			}
 		}
@@ -960,4 +974,14 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	default:
 		return false
 	}
+}
+
+func objCount(hb BufferReader, off, n int64, kb BufferReader, key, val Opcode) (c int64) {
+	for j := range n {
+		if equalBuf(hb, hb.code[off+2*j], kb, key) && equalBuf(hb, hb.code[off+2*j+1], kb, val) {
+			c++
+		}
+	}
+
+	return c
 }
