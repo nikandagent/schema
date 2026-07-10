@@ -33,6 +33,9 @@ type (
 		SchemaBuf() BufferReader
 		Rewriting() bool
 
+		Diags() []Diag
+		SetDiags(d []Diag)
+
 		DataPath() []Opcode
 		SchemaPath() []Opcode
 	}
@@ -125,6 +128,13 @@ func (c *cur) Apply(op, val Opcode) (Opcode, error) {
 func (c *cur) Buf() *Buffer            { return c.b }
 func (c *cur) SchemaBuf() BufferReader { return c.s.prog.Reader() }
 func (c *cur) Rewriting() bool         { return c.rewrite }
+
+// Diags is the accumulated diagnostics so far; its length marks the point before
+// a subtree ran. SetDiags writes back a filtered slice — snapshot len(Diags()),
+// recurse via Apply, then drop the tail's unwanted entries. See matches, which
+// uses the same snapshot/rewind internally to discard a trial branch's diags.
+func (c *cur) Diags() []Diag     { return c.diag }
+func (c *cur) SetDiags(d []Diag) { c.diag = d }
 
 func (c *cur) DataPath() []Opcode   { return c.dpath }
 func (c *cur) SchemaPath() []Opcode { return c.spath }
