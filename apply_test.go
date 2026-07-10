@@ -3,6 +3,8 @@ package schema
 import (
 	"bytes"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -615,6 +617,62 @@ func TestXHookUnregistered(tb *testing.T) {
 
 	if d, err := s.Validate([]byte(`{}`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate: err=%v diag=%v", err, d)
+	}
+}
+
+func TestXTypeIDToObject(tb *testing.T) {
+	// An x-type:id keyword rewrites the governed "entity/version" string into an
+	// {"entity": <string>, "version": <int>} object; version is omitted when it is
+	// 0 or absent. A sibling type:string check runs first (on the still-string
+	// value), so it passes before the Ext swaps in the object.
+	idToObject := func(c Applier, op, val Opcode) (Opcode, error) {
+		if op.Op() != Ext {
+			return c.Apply(op, val)
+		}
+
+		kids := c.SchemaBuf().Nodes(op)
+		key := string(c.SchemaBuf().String(kids[0]))
+		value := string(c.SchemaBuf().String(kids[1]))
+
+		if key != "x-type" || value != "id" || !c.Rewriting() || val.Op() != Str {
+			return val, nil
+		}
+
+		// String() bytes are transient; string(...) copies them out.
+		entity, ver, _ := strings.Cut(string(c.Buf().Reader().String(val)), "/")
+
+		w := c.Buf().Writer()
+		kv := []Opcode{w.Bytes([]byte("entity")), w.Bytes([]byte(entity))}
+
+		if n, _ := strconv.Atoi(ver); n != 0 {
+			kv = append(kv, w.Bytes([]byte("version")), MakeInt(int64(n)))
+		}
+
+		return w.Object(kv...), nil
+	}
+
+	cases := []struct{ schema, in, out string }{
+		{`{"properties":{"user":{"x-type":"id"}}}`, `{"user":"u1/3"}`, `{"user":{"entity":"u1","version":3}}`},
+		{`{"properties":{"user":{"type":"string","x-type":"id"}}}`, `{"user":"u1/0"}`, `{"user":{"entity":"u1"}}`},
+		{`{"properties":{"user":{"x-type":"id"}}}`, `{"user":"u1"}`, `{"user":{"entity":"u1"}}`},
+		{`{"items":{"x-type":"id"}}`, `["a/1","b/0","c"]`, `[{"entity":"a","version":1},{"entity":"b"},{"entity":"c"}]`},
+	}
+
+	for i, tc := range cases {
+		var s Schema
+
+		if err := s.Compile([]byte(tc.schema)); err != nil {
+			tb.Fatalf("[%d] compile: %v", i, err)
+		}
+
+		out, diag, err := s.WalkRewrite(nil, []byte(tc.in), idToObject)
+		if err != nil {
+			tb.Fatalf("[%d] rewrite: %v", i, err)
+		}
+
+		if string(out) != tc.out {
+			tb.Errorf("[%d] got %q want %q (diag %v)", i, out, tc.out, diag)
+		}
 	}
 }
 

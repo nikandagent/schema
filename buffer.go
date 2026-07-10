@@ -1,6 +1,9 @@
 package schema
 
 import (
+	"math"
+	"strconv"
+
 	"nikand.dev/go/json2"
 	"nikand.dev/go/skip"
 )
@@ -190,13 +193,41 @@ func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
 	return makeNode(op.Op(), off, len(s))
 }
 
-func (b BufferWriter) String(s []byte) Opcode {
+func (b BufferWriter) Bytes(s []byte) Opcode {
 	var e json2.Emitter
 
 	off := len(b.src) + len(b.text)
 	b.text = e.AppendString(b.text, s)
 
 	return makeNode(Str, off, len(b.src)+len(b.text)-off)
+}
+
+func (b BufferWriter) String(s string) Opcode {
+	return b.Bytes([]byte(s))
+}
+
+func (b BufferWriter) Int(x int) Opcode {
+	return MakeInt(int64(x))
+}
+
+func (b BufferWriter) Int64(x int64) Opcode {
+	return MakeInt(x)
+}
+
+func (b BufferWriter) Float(x float64) Opcode {
+	return MakeFlt(x)
+}
+
+func (b BufferWriter) Bool(x bool) Opcode {
+	if x {
+		return True
+	}
+
+	return False
+}
+
+func (b BufferWriter) Null() Opcode {
+	return Null
 }
 
 // Nodes assembles nodes into a fresh container of kind cont (Array or Object) in
@@ -264,6 +295,10 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 		return append(w, "false"...)
 	case Num, Str:
 		return append(w, b.Span(val)...)
+	case IntLit:
+		return strconv.AppendInt(w, val.Imm(), 10)
+	case FltLit:
+		return strconv.AppendFloat(w, val.Flt(), 'f', -1, 64)
 	case Array:
 		voff, vn := val.Off(), val.Arg()
 
@@ -385,4 +420,61 @@ func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
 
 	buf, _, err := d.DecodeString(sp, 0, buf)
 	return buf, err
+}
+
+// Int, Int64, and Float read a numeric value node, whether it was decoded from
+// JSON text (a Num span) or synthesized in-opcode (an IntLit or FltLit). A
+// non-numeric node yields ErrNotNumber; a malformed Num span yields the decoder's
+// parse error.
+func (b BufferReader) Int(op Opcode) (int, error) {
+	v, err := b.Int64(op)
+	return int(v), err
+}
+
+func (b BufferReader) Int64(op Opcode) (int64, error) {
+	switch op.Op() {
+	case IntLit:
+		return op.Imm(), nil
+	case FltLit:
+		v := op.Flt()
+		if v != math.Trunc(v) {
+			return 0, ErrNotInteger
+		}
+
+		return int64(v), nil
+	case Num:
+		sp := b.Span(op)
+
+		// Plain integer literals parse exactly (int64 outranges float64's integers);
+		// decimal/exponent forms fall back to a value check: integral or ErrNotInteger.
+		if v, err := json2.Value(sp).Int64(); err == nil {
+			return v, nil
+		}
+
+		v, err := json2.Value(sp).Float64()
+		if err != nil {
+			return 0, err
+		}
+
+		if v != math.Trunc(v) {
+			return 0, ErrNotInteger
+		}
+
+		return int64(v), nil
+	default:
+		return 0, ErrNotNumber
+	}
+}
+
+func (b BufferReader) Float(op Opcode) (float64, error) {
+	switch op.Op() {
+	case FltLit:
+		return op.Flt(), nil
+	case IntLit:
+		return float64(op.Imm()), nil
+	case Num:
+		return json2.Value(b.Span(op)).Float64()
+	default:
+		return 0, ErrNotNumber
+	}
 }

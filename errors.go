@@ -28,6 +28,14 @@ var (
 	ErrTrailingData = json2.ErrTrailingData
 )
 
+// ErrNotNumber is returned by the numeric readers (Int, Int64, Float) when the
+// value node is not a number; ErrNotInteger when an integer reader is handed a
+// number with a fractional part.
+var (
+	ErrNotNumber  = errors.New("not a number")
+	ErrNotInteger = errors.New("not an integer")
+)
+
 // Schema error categories. Each concrete failure is an *Error whose Err is one
 // of these, so errors.Is(err, ErrKeyword) still classifies it.
 var (

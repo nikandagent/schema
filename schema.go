@@ -1,6 +1,9 @@
 package schema
 
-import "regexp"
+import (
+	"math"
+	"regexp"
+)
 
 type (
 	Schema struct {
@@ -109,6 +112,7 @@ const (
 
 	None
 	IntLit
+	FltLit
 	SrcOff
 	SrcSpan
 	Each
@@ -168,6 +172,14 @@ func makeNode(op Opcode, off, n int) Opcode {
 	return op | Opcode(n)<<argShift | Opcode(off)<<offShift
 }
 
+func MakeInt(v int64) Opcode {
+	if v < minImm || v > maxImm {
+		panic(v)
+	}
+
+	return IntLit | Opcode(v)<<argShift
+}
+
 func makeImm(op Opcode, v int) Opcode {
 	if v < minImm || v > maxImm {
 		panic(v)
@@ -176,10 +188,19 @@ func makeImm(op Opcode, v int) Opcode {
 	return op | Opcode(v)<<argShift
 }
 
-func (op Opcode) Op() Opcode { return op & opMask }
-func (op Opcode) Imm() int64 { return int64(op) >> argShift }
-func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
-func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
+// MakeFlt packs v into the opcode itself, tagged FltLit. The low 8 mantissa bits
+// make room for the tag, so v is stored to ~44 mantissa bits (magnitude exact,
+// ~13 significant digits). The +0x80 rounds to nearest instead of truncating,
+// halving the error; the carry propagates correctly into the exponent.
+func MakeFlt(v float64) Opcode {
+	return FltLit | Opcode(math.Float64bits(v)+0x80)&^opMask
+}
+
+func (op Opcode) Op() Opcode   { return op & opMask }
+func (op Opcode) Imm() int64   { return int64(op) >> argShift }
+func (op Opcode) Arg() int64   { return int64(op >> argShift & argMask) }
+func (op Opcode) Off() int64   { return int64(op >> offShift & offMask) }
+func (op Opcode) Flt() float64 { return math.Float64frombits(uint64(op &^ opMask)) }
 
 // OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
 // lengths; the payload fields are far below math.MaxInt on any real program.
