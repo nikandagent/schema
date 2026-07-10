@@ -145,7 +145,7 @@ func TestInvalid(tb *testing.T) {
 		tb.Fatalf("AsError(%d diags) = nil, want error", len(diags))
 	}
 
-	var inv Invalid
+	var inv Diagnostics
 	if !errors.As(err, &inv) {
 		tb.Errorf("errors.As(err, &inv) = false")
 	}
@@ -250,7 +250,7 @@ func TestFormatNicely(tb *testing.T) {
 			tb.Fatalf("D: diag count %d, want 2", len(diag))
 		}
 
-		got := string(Invalid(diag).FormatNicelyContext(nil, []byte(data), 5, 5))
+		got := string(Diagnostics(diag).FormatNicelyContext(nil, []byte(data), 5, 5))
 		if n := strings.Count(got, "\n\n"); n != 1 {
 			tb.Errorf("D: %d blank-line separators, want 1: %q", n, got)
 		}

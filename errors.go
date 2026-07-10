@@ -50,8 +50,8 @@ func (e *Error) Error() string { return e.Err.Error() + ": " + e.Message }
 func (e *Error) Unwrap() error { return e.Err }
 
 // FormatNicely appends the snippet(s) with a default context width.
-func (d Diag) FormatNicely(w, src []byte) []byte    { return d.FormatNicelyContext(w, src, 10, 10) }
-func (e Invalid) FormatNicely(w, src []byte) []byte { return e.FormatNicelyContext(w, src, 10, 10) }
+func (d Diag) FormatNicely(w, src []byte) []byte        { return d.FormatNicelyContext(w, src, 10, 10) }
+func (e Diagnostics) FormatNicely(w, src []byte) []byte { return e.FormatNicelyContext(w, src, 10, 10) }
 
 // FormatNicelyContext appends a two-line snippet locating the diagnostic in src:
 // the offending span with up to before/after context bytes around it (elided
@@ -135,13 +135,13 @@ func clampSpan(off, end, n int) (int, int) {
 	return off, end
 }
 
-// Invalid carries validation diagnostics as an error, so a caller can return
+// Diagnostics carries validation diagnostics as an error, so a caller can return
 // them through a plain error result and recover them higher up the stack with
 // errors.As(err, &inv). Diagnostics are not errors on their own — Validate
-// returns them alongside a nil error; wrap them in Invalid only to propagate.
-type Invalid []Diag
+// returns them alongside a nil error; wrap them in Diagnostics only to propagate.
+type Diagnostics []Diag
 
-func (e Invalid) Error() string {
+func (e Diagnostics) Error() string {
 	switch len(e) {
 	case 0:
 		return "invalid document"
@@ -154,7 +154,7 @@ func (e Invalid) Error() string {
 
 // FormatNicelyContext appends each diagnostic's snippet (see
 // Diag.FormatNicelyContext), separated by a blank line.
-func (e Invalid) FormatNicelyContext(w, src []byte, before, after int) []byte {
+func (e Diagnostics) FormatNicelyContext(w, src []byte, before, after int) []byte {
 	for i, d := range e {
 		if i != 0 {
 			w = append(w, '\n')
@@ -173,13 +173,13 @@ func AsError(diags []Diag) error {
 		return nil
 	}
 
-	return Invalid(diags)
+	return Diagnostics(diags)
 }
 
 // AsDiag returns the diagnostics carried by an Invalid anywhere in err's chain,
 // or nil when err carries none.
 func AsDiag(err error) []Diag {
-	var inv Invalid
+	var inv Diagnostics
 	if errors.As(err, &inv) {
 		return inv
 	}

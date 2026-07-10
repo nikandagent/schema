@@ -194,7 +194,7 @@ func TestRewriteFlags(tb *testing.T) {
 }
 
 func TestWalk(tb *testing.T) {
-	delegate := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+	delegate := func(c Applier, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(op, val, h) }
 
 	// 1. delegating handler reproduces default Validate.
 	for _, tc := range []struct {
@@ -232,14 +232,14 @@ func TestWalk(tb *testing.T) {
 	myErr := errors.New("boom")
 	s, _ := Compile([]byte(`{"type":"string"}`))
 
-	fail := func(c Applier, op, val Opcode) (Opcode, error) { return 0, myErr }
+	fail := func(c Applier, op, val Opcode, h Handler) (Opcode, error) { return 0, myErr }
 	if _, err := s.Walk([]byte(`"x"`), fail); !errors.Is(err, myErr) {
 		tb.Errorf("custom error: got %v, want %v", err, myErr)
 	}
 
 	// 3. ErrBreak is a clean stop; traversal halts before recursing.
 	n := 0
-	brk := func(c Applier, op, val Opcode) (Opcode, error) {
+	brk := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		n++
 		return val, ErrBreak
 	}
@@ -250,7 +250,7 @@ func TestWalk(tb *testing.T) {
 	}
 
 	// 4. c.Fail records the verdict in a diag; ErrBreak is swallowed, so err is nil.
-	rep := func(c Applier, op, val Opcode) (Opcode, error) {
+	rep := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		c.Fail(op, val, "handler says no")
 		return val, ErrBreak
 	}
@@ -261,7 +261,7 @@ func TestWalk(tb *testing.T) {
 }
 
 func TestWalkRewrite(tb *testing.T) {
-	delegate := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+	delegate := func(c Applier, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(op, val, h) }
 
 	// delegating handler reproduces the default rewrite: fills defaults, reorders.
 	for _, tc := range []struct{ schema, in, out string }{
@@ -289,7 +289,7 @@ func TestWalkRewrite(tb *testing.T) {
 	myErr := errors.New("boom")
 	s, _ := Compile([]byte(`{"type":"object"}`))
 
-	fail := func(c Applier, op, val Opcode) (Opcode, error) { return 0, myErr }
+	fail := func(c Applier, op, val Opcode, h Handler) (Opcode, error) { return 0, myErr }
 	if _, _, err := s.WalkRewrite(nil, []byte(`{}`), fail); !errors.Is(err, myErr) {
 		tb.Errorf("walkrewrite custom error: got %v, want %v", err, myErr)
 	}
@@ -322,9 +322,9 @@ func TestWalkRead(tb *testing.T) {
 		}
 	}
 
-	h := func(c Applier, op, val Opcode) (Opcode, error) {
+	h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		collect(c.Buf().Reader(), val)
-		return c.Apply(op, val)
+		return c.Apply(op, val, h)
 	}
 
 	s, err := Compile([]byte(`{"type":"object"}`))
@@ -355,7 +355,7 @@ func TestWalkSchemaBuf(tb *testing.T) {
 	// words (key, subschema, ...) for its n declared properties.
 	var saw bool
 
-	h := func(c Applier, op, val Opcode) (Opcode, error) {
+	h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if op.Op() == Properties {
 			saw = true
 
@@ -369,7 +369,7 @@ func TestWalkSchemaBuf(tb *testing.T) {
 			}
 		}
 
-		return c.Apply(op, val)
+		return c.Apply(op, val, h)
 	}
 
 	s, err := Compile([]byte(`{"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}`))
@@ -551,9 +551,9 @@ func TestXHook(tb *testing.T) {
 
 	// The x-type:upper keyword is now an inert Ext node; a Walk handler detects it
 	// and uppercases the governed string value, replacing the old registered hook.
-	upper := func(c Applier, op, val Opcode) (Opcode, error) {
+	upper := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if op.Op() != Ext {
-			return c.Apply(op, val)
+			return c.Apply(op, val, h)
 		}
 
 		rewriting = c.Rewriting()
@@ -625,9 +625,9 @@ func TestXTypeIDToObject(tb *testing.T) {
 	// {"entity": <string>, "version": <int>} object; version is omitted when it is
 	// 0 or absent. A sibling type:string check runs first (on the still-string
 	// value), so it passes before the Ext swaps in the object.
-	idToObject := func(c Applier, op, val Opcode) (Opcode, error) {
+	idToObject := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if op.Op() != Ext {
-			return c.Apply(op, val)
+			return c.Apply(op, val, h)
 		}
 
 		kids := c.SchemaBuf().Nodes(op)
@@ -683,12 +683,12 @@ func TestWalkFromJSON(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	h := func(c Applier, op, val Opcode) (Opcode, error) {
+	h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if val.Op() == Num {
 			return c.Buf().Writer().FromJSON([]byte(`{"wrapped":5}`))
 		}
 
-		return c.Apply(op, val)
+		return c.Apply(op, val, h)
 	}
 
 	out, _, err := s.WalkRewrite(nil, []byte(`5`), h)
@@ -709,12 +709,12 @@ func TestWalkEmitArray(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	repl := func(c Applier, op, val Opcode) (Opcode, error) {
+	repl := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if val.Op() == Num {
 			return c.Buf().Writer().Span(Num, []byte("42")), nil
 		}
 
-		return c.Apply(op, val)
+		return c.Apply(op, val, h)
 	}
 
 	out, _, err := s.WalkRewrite(nil, []byte(`[1,2,3]`), repl)
@@ -727,7 +727,7 @@ func TestWalkEmitArray(tb *testing.T) {
 	}
 
 	// structural sharing: a pure delegate leaves the input byte-identical.
-	pass := func(c Applier, op, val Opcode) (Opcode, error) { return c.Apply(op, val) }
+	pass := func(c Applier, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(op, val, h) }
 
 	out, _, err = s.WalkRewrite(nil, []byte(`[1,2,3]`), pass)
 	if err != nil {
@@ -757,12 +757,12 @@ func TestWalkEmit(tb *testing.T) {
 			continue
 		}
 
-		h := func(c Applier, op, val Opcode) (Opcode, error) {
+		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if val.Op() == tc.emit {
 				return c.Buf().Writer().Span(tc.emit, []byte(tc.bytes)), nil
 			}
 
-			return c.Apply(op, val)
+			return c.Apply(op, val, h)
 		}
 
 		out, _, err := s.WalkRewrite(nil, []byte(tc.in), h)
@@ -790,5 +790,86 @@ func TestRewriteCanonical(tb *testing.T) {
 
 	if got := string(out); got != `{"a":1,"b":[2,3]}` {
 		tb.Errorf("rewrite: %q", got)
+	}
+}
+
+func TestWalkHandlerSwap(tb *testing.T) {
+	// The handler passed to Apply is the one that sees the subtree's children.
+	// Passing self keeps the handler in the loop; passing nil runs the subtree
+	// with default behaviour only. Either way the built-in validation still runs.
+	s, err := Compile([]byte(`{"properties":{"a":{"type":"string"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	var seen int
+	self := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		seen++
+		return c.Apply(op, val, h)
+	}
+
+	var top int
+	cut := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		top++
+		return c.Apply(op, val, nil) // descendants fall to default; handler not re-entered
+	}
+
+	ds, es := s.Walk([]byte(`{"a":1}`), self)
+	dc, ec := s.Walk([]byte(`{"a":1}`), cut)
+
+	if es != nil || ec != nil {
+		tb.Fatalf("errors: self=%v cut=%v", es, ec)
+	}
+
+	// Both still catch the type mismatch — validation is unaffected by the swap.
+	if len(ds) != 1 || len(dc) != 1 {
+		tb.Fatalf("diags: self=%d cut=%d, want 1/1", len(ds), len(dc))
+	}
+
+	if top != 1 {
+		tb.Errorf("cut handler calls=%d, want 1 (nil delegate stops re-entry)", top)
+	}
+
+	if seen <= top {
+		tb.Errorf("self handler calls=%d, want > cut's %d", seen, top)
+	}
+}
+
+func TestWalkFilterDiags(tb *testing.T) {
+	// A handler validates a subtree the normal way, then drops the diagnostics it
+	// produced from the tail — the snapshot/filter pattern Diags/SetDiags enable.
+	s, err := Compile([]byte(`{"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	// Suppress diagnostics raised anywhere under property "b".
+	h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		mark := len(c.Diags())
+
+		nv, err := c.Apply(op, val, h)
+		if err != nil {
+			return nv, err
+		}
+
+		dp := c.DataPath()
+		if len(dp) != 0 && string(c.Buf().Reader().String(dp[len(dp)-1])) == "b" {
+			c.SetDiags(c.Diags()[:mark])
+		}
+
+		return nv, nil
+	}
+
+	d, err := s.Walk([]byte(`{"a":1,"b":2}`), h)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if len(d) != 1 {
+		tb.Fatalf("diags=%d, want 1 (b suppressed, a kept)", len(d))
+	}
+
+	if d[0].Message != "wrong type" {
+		tb.Errorf("message=%q", d[0].Message)
 	}
 }

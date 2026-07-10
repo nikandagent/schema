@@ -13,8 +13,6 @@ type (
 		s *Schema
 		b *Buffer
 
-		h Handler
-
 		rewrite bool
 		diag    []Diag
 
@@ -24,10 +22,14 @@ type (
 		at []Opcode
 	}
 
-	Handler = func(c Applier, op, val Opcode) (Opcode, error)
+	// Handler is called per node during a Walk. It receives the handler to
+	// delegate with (normally itself, so children reach the handler too) and
+	// passes it on to Apply — pass nil to run a subtree with default behaviour
+	// only, or a different Handler to swap behaviour for that subtree.
+	Handler func(c Applier, op, val Opcode, h Handler) (Opcode, error)
 
 	Applier interface {
-		Apply(op, val Opcode) (Opcode, error)
+		Apply(op, val Opcode, h Handler) (Opcode, error)
 		Fail(op, val Opcode, msg string)
 		Buf() *Buffer
 		SchemaBuf() BufferReader
@@ -76,7 +78,6 @@ func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (Opco
 	c := cur{
 		s:       s,
 		b:       &s.b,
-		h:       h,
 		rewrite: rewrite,
 	}
 
@@ -92,37 +93,9 @@ func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (Opco
 		}
 	}
 
-	res, err := c.apply(s.root, root)
+	res, err := c.apply(s.root, root, h)
 
 	return res, c.diag, c.result(err)
-}
-
-// Two arenas, walked in parallel but never interlinked — each node's spans
-// point only into its own bytes:
-//
-//	schema (program)  nodes s.prog.code | bytes s.prog.src           (read-only)
-//	data              nodes c.b.code    | bytes c.b.src ++ c.b.text
-//
-// A block payload (off,count) indexes its arena's nodes; a span (off,len) its
-// bytes. Bytes slices are read-only, so rewrites that synthesize literals
-// (defaults, canon) copy the bytes into the writable c.b.text tail and build
-// nodes in c.b.code (data is where changes live). Data spans resolve a virtual
-// src++text concat by off vs len(src), so the input is never copied.
-
-// apply dispatches one node: a Walk handler sees it first (and may rewrite it or
-// recurse via Apply); otherwise the default behaviour runs.
-func (c *cur) apply(op, val Opcode) (Opcode, error) {
-	if c.h == nil {
-		return c.applyDefault(op, val)
-	}
-
-	return c.h(c, op, val)
-}
-
-// Apply runs the default behaviour for a node — the handler's delegate point.
-// Its recursions dispatch back through the handler.
-func (c *cur) Apply(op, val Opcode) (Opcode, error) {
-	return c.applyDefault(op, val)
 }
 
 func (c *cur) Buf() *Buffer            { return c.b }
@@ -139,21 +112,38 @@ func (c *cur) SetDiags(d []Diag) { c.diag = d }
 func (c *cur) DataPath() []Opcode   { return c.dpath }
 func (c *cur) SchemaPath() []Opcode { return c.spath }
 
-func (c *cur) applyChild(sub, val, step Opcode) (Opcode, error) {
-	mark := len(c.spath)
+// Two arenas, walked in parallel but never interlinked — each node's spans
+// point only into its own bytes:
+//
+//	schema (program)  nodes s.prog.code | bytes s.prog.src           (read-only)
+//	data              nodes c.b.code    | bytes c.b.src ++ c.b.text
+//
+// A block payload (off,count) indexes its arena's nodes; a span (off,len) its
+// bytes. Bytes slices are read-only, so rewrites that synthesize literals
+// (defaults, canon) copy the bytes into the writable c.b.text tail and build
+// nodes in c.b.code (data is where changes live). Data spans resolve a virtual
+// src++text concat by off vs len(src), so the input is never copied.
 
-	c.spath = append(c.spath, sub)
-	c.dpath = append(c.dpath, step)
+// apply dispatches one node: if h is set the handler sees it first (and may
+// rewrite it or recurse via Apply), otherwise the default behaviour runs. h is
+// threaded through every recursion so the caller always knows which handler is
+// in effect, instead of it being implicit state.
+func (c *cur) apply(op, val Opcode, h Handler) (Opcode, error) {
+	if h == nil {
+		return c.applyStep(op, val, h)
+	}
 
-	defer func() {
-		c.spath = c.spath[:mark]
-		c.dpath = c.dpath[:mark]
-	}()
-
-	return c.apply(sub, val)
+	return h(c, op, val, h)
 }
 
-func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
+// Apply runs the default behaviour for a node — the handler's delegate point.
+// Its recursions dispatch through h, so pass the handler along (normally the one
+// the handler was given) to keep seeing children, or nil to fall to default.
+func (c *cur) Apply(op, val Opcode, h Handler) (Opcode, error) {
+	return c.applyStep(op, val, h)
+}
+
+func (c *cur) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	switch op.Op() {
 	case Pass:
 	case Fail:
@@ -162,7 +152,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		off, n := op.Off(), op.Arg()
 
 		for i := range n {
-			nv, err := c.apply(c.s.prog.code[off+i], val)
+			nv, err := c.apply(c.s.prog.code[off+i], val, h)
 			if err != nil {
 				return nv, err
 			}
@@ -172,7 +162,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	case Type:
 		c.checkType(op, val)
 	case Properties:
-		return c.checkProps(op, val)
+		return c.checkProps(op, val, h)
 	case Required:
 		c.checkRequired(op, val)
 	case MinProps:
@@ -184,7 +174,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 			c.Fail(op, val, "too many properties")
 		}
 	case Items:
-		return c.checkItems(op, val)
+		return c.checkItems(op, val, h)
 	case MinItems:
 		if val.Op() == Array && val.Arg() < op.Imm() {
 			c.Fail(op, val, "too few items")
@@ -230,7 +220,7 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 			c.Fail(op, val, "not the const value")
 		}
 	case Not:
-		ok, err := c.matches(c.s.prog.code[op.Off()], val)
+		ok, err := c.matches(c.s.prog.code[op.Off()], val, h)
 		if err != nil {
 			return val, err
 		}
@@ -242,16 +232,16 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		off, n := op.Off(), op.Arg()
 
 		for i := range n {
-			if _, err := c.apply(c.s.prog.code[off+i], val); err != nil {
+			if _, err := c.apply(c.s.prog.code[off+i], val, h); err != nil {
 				return val, err
 			}
 		}
 	case AnyOf:
-		if err := c.checkAnyOf(op, val); err != nil {
+		if err := c.checkAnyOf(op, val, h); err != nil {
 			return val, err
 		}
 	case OneOf:
-		if err := c.checkOneOf(op, val); err != nil {
+		if err := c.checkOneOf(op, val, h); err != nil {
 			return val, err
 		}
 	case Ref:
@@ -263,19 +253,19 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 		}
 
 		if ts == c.s {
-			return c.apply(tnode, val)
+			return c.apply(tnode, val, h)
 		}
 
 		saved := c.s
 		c.s = ts
-		v, err := c.apply(tnode, val)
+		v, err := c.apply(tnode, val, h)
 		c.s = saved
 
 		return v, err
 	case Additional:
-		return c.checkAdditional(op, val)
+		return c.checkAdditional(op, val, h)
 	case PatternProps:
-		return c.checkPatternProps(op, val)
+		return c.checkPatternProps(op, val, h)
 	case Pattern:
 		if val.Op() == Str && !c.s.patterns[op].Match(c.b.Reader().String(val)) {
 			c.Fail(op, val, "does not match pattern")
@@ -289,6 +279,20 @@ func (c *cur) applyDefault(op, val Opcode) (Opcode, error) {
 	}
 
 	return val, nil
+}
+
+func (c *cur) applyChild(sub, val, step Opcode, h Handler) (Opcode, error) {
+	mark := len(c.spath)
+
+	c.spath = append(c.spath, sub)
+	c.dpath = append(c.dpath, step)
+
+	defer func() {
+		c.spath = c.spath[:mark]
+		c.dpath = c.dpath[:mark]
+	}()
+
+	return c.apply(sub, val, h)
 }
 
 func (c *cur) checkType(op, val Opcode) {
@@ -305,7 +309,7 @@ func (c *cur) checkType(op, val Opcode) {
 	}
 }
 
-func (c *cur) checkProps(op, val Opcode) (Opcode, error) {
+func (c *cur) checkProps(op, val Opcode, h Handler) (Opcode, error) {
 	seek := c.seeking()
 
 	switch seek.Op() {
@@ -323,13 +327,13 @@ func (c *cur) checkProps(op, val Opcode) (Opcode, error) {
 	}
 
 	if !c.rewrite {
-		return val, c.validateProps(op, val)
+		return val, c.validateProps(op, val, h)
 	}
 
-	return c.rewriteProps(op, val)
+	return c.rewriteProps(op, val, h)
 }
 
-func (c *cur) validateProps(op, val Opcode) error {
+func (c *cur) validateProps(op, val Opcode, h Handler) error {
 	seek := c.seeking()
 	off, n := op.Off(), op.Arg()
 
@@ -346,7 +350,7 @@ func (c *cur) validateProps(op, val Opcode) error {
 			continue
 		}
 
-		if _, err := c.applyChild(sub, v, key); err != nil {
+		if _, err := c.applyChild(sub, v, key, h); err != nil {
 			return err
 		}
 	}
@@ -354,7 +358,7 @@ func (c *cur) validateProps(op, val Opcode) error {
 	return nil
 }
 
-func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
+func (c *cur) rewriteProps(op, val Opcode, h Handler) (Opcode, error) {
 	mark := len(c.b.tmp)
 	defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
@@ -362,9 +366,9 @@ func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
 	var err error
 
 	if c.s.Flags.Is(KeepKeyOrder) {
-		dirty, err = c.orderedProps(op, val)
+		dirty, err = c.orderedProps(op, val, h)
 	} else {
-		dirty, err = c.canonProps(op, val)
+		dirty, err = c.canonProps(op, val, h)
 	}
 
 	if err != nil {
@@ -378,7 +382,7 @@ func (c *cur) rewriteProps(op, val Opcode) (Opcode, error) {
 	return c.b.Writer().Object(c.b.tmp[mark:]...), nil
 }
 
-func (c *cur) orderedProps(op, val Opcode) (bool, error) {
+func (c *cur) orderedProps(op, val Opcode, h Handler) (bool, error) {
 	dirty := false
 
 	voff, vn := val.Off(), val.Arg()
@@ -388,7 +392,7 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 		v := c.b.code[voff+2*i+1]
 
 		if sub, ok := c.propSub(op, key); ok {
-			nv, err := c.applyChild(sub, v, key)
+			nv, err := c.applyChild(sub, v, key, h)
 			if err != nil {
 				return dirty, err
 			}
@@ -424,7 +428,7 @@ func (c *cur) orderedProps(op, val Opcode) (bool, error) {
 	return dirty, nil
 }
 
-func (c *cur) canonProps(op, val Opcode) (bool, error) {
+func (c *cur) canonProps(op, val Opcode, h Handler) (bool, error) {
 	voff, vn := val.Off(), val.Arg()
 
 	dirty := false
@@ -437,7 +441,7 @@ func (c *cur) canonProps(op, val Opcode) (bool, error) {
 		sub := c.s.prog.code[off+2*i+1]
 
 		if key, v, ok := c.member(val, name); ok {
-			nv, err := c.applyChild(sub, v, key)
+			nv, err := c.applyChild(sub, v, key, h)
 			if err != nil {
 				return dirty, err
 			}
@@ -514,7 +518,7 @@ func (c *cur) copyLit(op Opcode) Opcode {
 	return c.b.Writer().CopyFrom(c.s.prog.Reader(), op)
 }
 
-func (c *cur) checkAdditional(op, val Opcode) (Opcode, error) {
+func (c *cur) checkAdditional(op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
@@ -522,13 +526,13 @@ func (c *cur) checkAdditional(op, val Opcode) (Opcode, error) {
 	props, patterns, sub := c.s.additionalParts(op)
 
 	if !c.rewrite {
-		return val, c.validateAdditional(props, patterns, sub, val)
+		return val, c.validateAdditional(props, patterns, sub, val, h)
 	}
 
-	return c.rewriteAdditional(props, patterns, sub, val)
+	return c.rewriteAdditional(props, patterns, sub, val, h)
 }
 
-func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
+func (c *cur) validateAdditional(props, patterns, sub, val Opcode, h Handler) error {
 	voff, vn := val.Off(), val.Arg()
 
 	for i := range vn {
@@ -543,7 +547,7 @@ func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
 			continue
 		}
 
-		if _, err := c.applyChild(sub, v, key); err != nil {
+		if _, err := c.applyChild(sub, v, key, h); err != nil {
 			return err
 		}
 	}
@@ -551,7 +555,7 @@ func (c *cur) validateAdditional(props, patterns, sub, val Opcode) error {
 	return nil
 }
 
-func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode) (Opcode, error) {
+func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode, h Handler) (Opcode, error) {
 	mark := len(c.b.tmp)
 	defer func() { c.b.tmp = c.b.tmp[:mark] }()
 
@@ -563,7 +567,7 @@ func (c *cur) rewriteAdditional(props, patterns, sub, val Opcode) (Opcode, error
 		v := c.b.code[voff+2*i+1]
 
 		if !c.covered(props, patterns, key) {
-			nv, err := c.applyChild(sub, v, key)
+			nv, err := c.applyChild(sub, v, key, h)
 			if err != nil {
 				return val, err
 			}
@@ -613,7 +617,7 @@ func (c *cur) patternHit(patterns, key Opcode) bool {
 	return false
 }
 
-func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
+func (c *cur) checkPatternProps(op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
@@ -642,7 +646,7 @@ func (c *cur) checkPatternProps(op, val Opcode) (Opcode, error) {
 				continue
 			}
 
-			nv, err := c.applyChild(sub, v, key)
+			nv, err := c.applyChild(sub, v, key, h)
 			if err != nil {
 				return val, err
 			}
@@ -681,7 +685,7 @@ func (c *cur) checkRequired(op, val Opcode) {
 	}
 }
 
-func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
+func (c *cur) checkItems(op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Array {
 		return val, nil
 	}
@@ -717,7 +721,7 @@ func (c *cur) checkItems(op, val Opcode) (Opcode, error) {
 
 		v := c.b.code[voff+i]
 
-		nv, err := c.applyChild(sub, v, makeImm(IntLit, int(i)))
+		nv, err := c.applyChild(sub, v, makeImm(IntLit, int(i)), h)
 		if err != nil {
 			return val, err
 		}
@@ -765,11 +769,11 @@ func (c *cur) checkEnum(op, val Opcode) {
 	c.Fail(op, val, "not in enum")
 }
 
-func (c *cur) checkAnyOf(op, val Opcode) error {
+func (c *cur) checkAnyOf(op, val Opcode, h Handler) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		ok, err := c.matches(c.s.prog.code[off+i], val)
+		ok, err := c.matches(c.s.prog.code[off+i], val, h)
 		if err != nil {
 			return err
 		}
@@ -784,12 +788,12 @@ func (c *cur) checkAnyOf(op, val Opcode) error {
 	return nil
 }
 
-func (c *cur) checkOneOf(op, val Opcode) error {
+func (c *cur) checkOneOf(op, val Opcode, h Handler) error {
 	off, n := op.Off(), op.Arg()
 	cnt := 0
 
 	for i := range n {
-		ok, err := c.matches(c.s.prog.code[off+i], val)
+		ok, err := c.matches(c.s.prog.code[off+i], val, h)
 		if err != nil {
 			return err
 		}
@@ -807,11 +811,11 @@ func (c *cur) checkOneOf(op, val Opcode) error {
 }
 
 // matches calls apply, but drops diag messages.
-func (c *cur) matches(op, val Opcode) (bool, error) {
+func (c *cur) matches(op, val Opcode, h Handler) (bool, error) {
 	n := len(c.diag)
 	defer func() { c.diag = c.diag[:n] }()
 
-	if _, err := c.apply(op, val); err != nil {
+	if _, err := c.apply(op, val, h); err != nil {
 		return false, err
 	}
 
