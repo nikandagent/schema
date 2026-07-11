@@ -43,11 +43,13 @@ func Compile(b []byte) (*Schema, error) {
 
 func (s *Schema) Compile(schema []byte) error {
 	b := &s.prog
+	b.Reset()
 
 	b.src = schema
-	b.code = b.code[:0]
-	b.text = b.text[:0]
-	b.tmp = b.tmp[:0]
+
+	if s.defs == nil {
+		s.defs = s.defsbuf[:]
+	}
 
 	s.defs = s.defs[:0]
 	clear(s.patterns)

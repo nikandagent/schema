@@ -20,6 +20,7 @@ type (
 		tmp []Opcode // decode scratch
 
 		textbuf [16]byte
+		opbuf   [46]Opcode // size is tuned for allocation span buckets
 	}
 
 	// BufferReader is the read-only face of a Buffer.
@@ -33,13 +34,19 @@ func (b *Buffer) Reader() BufferReader { return BufferReader{b} }
 func (b *Buffer) Writer() BufferWriter { return BufferWriter{b} }
 
 func (b *Buffer) Reset() {
-	b.code = b.code[:0]
-	b.text = b.text[:0]
-	b.tmp = b.tmp[:0]
-
+	if b.tmp == nil {
+		b.tmp = b.opbuf[:10:10]
+	}
+	if b.code == nil {
+		b.code = b.opbuf[10:]
+	}
 	if b.text == nil {
 		b.text = b.textbuf[:]
 	}
+
+	b.code = b.code[:0]
+	b.text = b.text[:0]
+	b.tmp = b.tmp[:0]
 }
 
 func (b *Buffer) decode(r []byte) (Opcode, error) {

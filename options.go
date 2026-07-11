@@ -1,10 +1,29 @@
 package schema
 
-type Option func(*cur) error
+type (
+	Option interface {
+		apply(a *Applier) error
+	}
+
+	opt func(a *Applier) error
+
+	use struct {
+		a *Applier
+	}
+)
+
+func Use(a *Applier) Option {
+	if a == nil {
+		panic("you need an Applier")
+	}
+
+	return use{a: a}
+}
 
 func At(p ...any) Option {
-	return func(c *cur) error {
+	return opt(func(c *Applier) error {
 		bw := c.b.Writer()
+		c.at = c.at[:0]
 
 		for _, key := range p {
 			var op Opcode
@@ -28,5 +47,8 @@ func At(p ...any) Option {
 		}
 
 		return nil
-	}
+	})
 }
+
+func (o use) apply(a *Applier) error { return nil }
+func (o opt) apply(a *Applier) error { return o(a) }

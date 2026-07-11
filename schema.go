@@ -24,7 +24,9 @@ type (
 
 		patterns map[Opcode]*regexp.Regexp // pattern node -> compiled regex, filled at compile
 
-		b Buffer // reused data arena for Validate/Rewrite
+		c Applier
+
+		defsbuf [3]def // absorbs the slack the Applier trim opens, keeping Schema near its 1536 bucket
 	}
 
 	// Opcode is a schema instruction.

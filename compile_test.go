@@ -94,7 +94,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"type":"object","required":["a"]}`)
 
 		seen := false
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Required {
 				seen = true
 				if len(c.DataPath()) != 0 || len(c.SchemaPath()) != 0 {
@@ -119,7 +119,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"a":{"type":"string"}}}`)
 
 		seen := false
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				seen = true
 
@@ -152,7 +152,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"items":{"type":"number"}}`)
 
 		var idx []int
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				dp := c.DataPath()
 				if len(dp) != 1 || dp[0].Op() != IntLit {
@@ -178,7 +178,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"items":{"items":{"properties":{"deep":{"type":"string"}}}}}}`)
 
 		seen := false
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				seen = true
 
@@ -213,7 +213,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"allOf":[{"required":["a"]}]}`)
 
 		seen := false
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Required {
 				seen = true
 				if len(c.DataPath()) != 0 {
@@ -237,7 +237,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`)
 
 		var depths []int
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				depths = append(depths, len(c.DataPath()))
 			}
@@ -257,7 +257,7 @@ func TestPath(tb *testing.T) {
 	{
 		sc := compile(`{"required":["x"],"properties":{"obj":{"required":["y"]}}}`)
 
-		h := func(c Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Required && len(c.DataPath()) == 0 {
 				return val, nil
 			}
