@@ -123,6 +123,72 @@ func TestBufferKeyword(tb *testing.T) {
 	mustPanic(tb, "Keyword(Type)", func() { b.Keyword(typ, Type) })
 }
 
+func TestBufferIter(tb *testing.T) {
+	s, err := Compile([]byte(`{"type":"string","properties":{"a":{},"b":{}},"allOf":[{},{},{}],"not":{},"additionalProperties":{"type":"integer"}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	b := s.SchemaBuf()
+
+	var names []string
+	for k, v := range b.Iter(b.Keyword(s.Root(), Properties)) {
+		names = append(names, string(b.String(k)))
+		if v.Op() != All {
+			tb.Errorf("properties sub: got %v, want All", v.Op())
+		}
+	}
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		tb.Errorf("properties names: got %v", names)
+	}
+
+	n := 0
+	for k, _ := range b.Iter(b.Keyword(s.Root(), AllOf)) {
+		if k.ImmInt() != n {
+			tb.Errorf("allOf index: got %d, want %d", k.ImmInt(), n)
+		}
+		n++
+	}
+	if n != 3 {
+		tb.Errorf("allOf count: got %d, want 3", n)
+	}
+
+	n = 0
+	for k, _ := range b.Iter(b.Keyword(s.Root(), Not)) {
+		n++
+		if k != None {
+			tb.Errorf("not key: got %v, want None", k)
+		}
+	}
+	if n != 1 {
+		tb.Errorf("not count: got %d, want 1", n)
+	}
+
+	n = 0
+	for k, v := range b.Iter(b.Keyword(s.Root(), Additional)) {
+		n++
+		if k != None || v.Op() != All {
+			tb.Errorf("additional: got %v/%v, want None/All", k, v.Op())
+		}
+	}
+	if n != 1 {
+		tb.Errorf("additional count: got %d, want 1", n)
+	}
+
+	for range b.Iter(b.Keyword(s.Root(), Type)) {
+		tb.Errorf("type: yielded a pair, want none")
+	}
+
+	n = 0
+	for range b.Iter(b.Keyword(s.Root(), Properties)) {
+		n++
+		break
+	}
+	if n != 1 {
+		tb.Errorf("break: got %d iterations, want 1", n)
+	}
+}
+
 func TestBufferDeref(tb *testing.T) {
 	for _, tc := range []struct {
 		schema string

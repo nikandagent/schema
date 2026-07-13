@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"iter"
 	"math"
 	"strconv"
 
@@ -439,6 +440,41 @@ func (b BufferReader) Ext(op Opcode, key string) Opcode {
 	}
 
 	return None
+}
+
+// Iter ranges over the children of any node, pairing key with value — the
+// generalization of Nodes/NodesAt (pair- and list-blocks), Deref (single-child
+// pointers), and the variadic Additional. Pair-blocks yield (key, sub);
+// list-blocks yield (IntLit index, elem); single-child nodes yield (None, sub). A
+// scalar or in-opcode keyword (Type, MinLen, Pattern, …) has no children.
+func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
+	off := op.OffInt()
+
+	return func(yield func(k, v Opcode) bool) {
+		switch op.Op() {
+		case Object, Properties, PatternProps, Defs, Raw, Ext:
+			for i := range op.ArgInt() {
+				if !yield(b.code[off+2*i], b.code[off+2*i+1]) {
+					return
+				}
+			}
+		case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+			for i := range op.ArgInt() {
+				if !yield(MakeInt(int64(i)), b.code[off+i]) {
+					return
+				}
+			}
+		case Additional:
+			if op.ArgInt() == 3 {
+				yield(None, b.code[off+2]) // props, patterns, sub — sub only
+				return
+			}
+
+			yield(None, b.code[off])
+		case Not, Items, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+			yield(None, b.code[off])
+		}
+	}
 }
 
 // Keyword returns the keyword node of kind want among the keywords of schema
