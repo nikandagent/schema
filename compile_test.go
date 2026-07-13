@@ -128,7 +128,7 @@ func TestPath(tb *testing.T) {
 					tb.Fatalf("prop Type: DataPath=%d SchemaPath=%d, want 1 1",
 						len(dp), len(c.SchemaPath()))
 				}
-				if dp[0].Op() != Str {
+				if dp[0].Op() != String {
 					tb.Errorf("prop step Op=%v, want Str", dp[0].Op())
 				}
 				if got := string(c.Buf().Reader().String(dp[0])); got != "a" {
@@ -186,13 +186,13 @@ func TestPath(tb *testing.T) {
 				if len(dp) != 3 {
 					tb.Fatalf("deep Type: DataPath=%d, want 3", len(dp))
 				}
-				if dp[0].Op() != Str || string(c.Buf().Reader().String(dp[0])) != "items" {
+				if dp[0].Op() != String || string(c.Buf().Reader().String(dp[0])) != "items" {
 					tb.Errorf("step0 %v %q, want Str %q", dp[0].Op(), c.Buf().Reader().String(dp[0]), "items")
 				}
 				if dp[1].Op() != IntLit || dp[1].ImmInt() != 0 {
 					tb.Errorf("step1 %v %d, want IntLit 0", dp[1].Op(), dp[1].ImmInt())
 				}
-				if dp[2].Op() != Str || string(c.Buf().Reader().String(dp[2])) != "deep" {
+				if dp[2].Op() != String || string(c.Buf().Reader().String(dp[2])) != "deep" {
 					tb.Errorf("step2 %v %q, want Str %q", dp[2].Op(), c.Buf().Reader().String(dp[2]), "deep")
 				}
 			}

@@ -123,8 +123,8 @@ const (
 )
 
 const (
-	Num Opcode = span | iota
-	Str
+	Number Opcode = span | iota
+	String
 	Pattern
 
 	Key

@@ -186,31 +186,31 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	case Unique:
 		a.checkUnique(op, val)
 	case MinLen:
-		if val.Op() == Str && a.strlen(val) < op.Imm() {
+		if val.Op() == String && a.strlen(val) < op.Imm() {
 			a.Fail(op, val, "too short")
 		}
 	case MaxLen:
-		if val.Op() == Str && a.strlen(val) > op.Imm() {
+		if val.Op() == String && a.strlen(val) > op.Imm() {
 			a.Fail(op, val, "too long")
 		}
 	case Minimum:
-		if val.Op() == Num && a.number(val) < a.schemaNum(op) {
+		if val.Op() == Number && a.number(val) < a.schemaNum(op) {
 			a.Fail(op, val, "less than minimum")
 		}
 	case Maximum:
-		if val.Op() == Num && a.number(val) > a.schemaNum(op) {
+		if val.Op() == Number && a.number(val) > a.schemaNum(op) {
 			a.Fail(op, val, "greater than maximum")
 		}
 	case ExclMin:
-		if val.Op() == Num && a.number(val) <= a.schemaNum(op) {
+		if val.Op() == Number && a.number(val) <= a.schemaNum(op) {
 			a.Fail(op, val, "not above exclusive minimum")
 		}
 	case ExclMax:
-		if val.Op() == Num && a.number(val) >= a.schemaNum(op) {
+		if val.Op() == Number && a.number(val) >= a.schemaNum(op) {
 			a.Fail(op, val, "not below exclusive maximum")
 		}
 	case MultipleOf:
-		if val.Op() == Num && !a.multipleOf(op, val) {
+		if val.Op() == Number && !a.multipleOf(op, val) {
 			a.Fail(op, val, "not a multiple")
 		}
 	case Enum:
@@ -265,7 +265,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	case PatternProps:
 		return a.checkPatternProps(op, val, h)
 	case Pattern:
-		if val.Op() == Str && !a.s.patterns[op].Match(a.b.Reader().String(val)) {
+		if val.Op() == String && !a.s.patterns[op].Match(a.b.Reader().String(val)) {
 			a.Fail(op, val, "does not match pattern")
 		}
 	case Raw, Ext, Default, Defs:
@@ -937,9 +937,9 @@ func dataType(val Opcode) int {
 		return typeNull
 	case True, False:
 		return typeBool
-	case Num:
+	case Number:
 		return typeNum
-	case Str:
+	case String:
 		return typeStr
 	case Array:
 		return typeArr
@@ -958,12 +958,12 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	switch l.Op() {
 	case Null, True, False:
 		return true
-	case Num:
+	case Number:
 		lv, _ := json2.Value(lb.Span(l)).Float64()
 		rv, _ := json2.Value(rb.Span(r)).Float64()
 
 		return lv == rv
-	case Str:
+	case String:
 		return bytes.Equal(lb.Span(l), rb.Span(r))
 	case Array:
 		lo, ln := l.Off(), l.Arg()

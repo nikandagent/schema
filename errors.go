@@ -20,7 +20,15 @@ type (
 		Off, End int
 		Op       Opcode
 	}
+
+	// Diagnostics carries validation diagnostics as an error, so a caller can return
+	// them through a plain error result and recover them higher up the stack with
+	// errors.As(err, &inv). Diagnostics are not errors on their own — Validate
+	// returns them alongside a nil error; wrap them in Diagnostics only to propagate.
+	Diagnostics []Diag
 )
+
+const spaces = "                                                                                                                                "
 
 // JSON-shape errors, reused from the decoder.
 var (
@@ -112,8 +120,6 @@ func (d Diag) FormatNicelyContext(w, src []byte, before, after int) []byte {
 	return append(w, '\n')
 }
 
-const spaces = "                                                                                                                                "
-
 // appendCapitalized appends s with its first ASCII letter upper-cased.
 func appendCapitalized(w []byte, s string) []byte {
 	if s == "" {
@@ -134,12 +140,6 @@ func clampSpan(off, end, n int) (int, int) {
 
 	return off, end
 }
-
-// Diagnostics carries validation diagnostics as an error, so a caller can return
-// them through a plain error result and recover them higher up the stack with
-// errors.As(err, &inv). Diagnostics are not errors on their own — Validate
-// returns them alongside a nil error; wrap them in Diagnostics only to propagate.
-type Diagnostics []Diag
 
 func (e Diagnostics) Error() string {
 	switch len(e) {

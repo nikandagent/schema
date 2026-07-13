@@ -303,7 +303,7 @@ func TestWalkRead(tb *testing.T) {
 	var collect func(b BufferReader, val Opcode)
 	collect = func(b BufferReader, val Opcode) {
 		switch val.Op() {
-		case Num, Str:
+		case Number, String:
 			got[string(b.Span(val))] = true
 		case Array:
 			for _, e := range b.Nodes(val) {
@@ -562,8 +562,8 @@ func TestXHook(tb *testing.T) {
 		key := string(c.SchemaBuf().String(kids[0]))
 		value := string(c.SchemaBuf().String(kids[1]))
 
-		if key == "x-type" && value == "upper" && c.Rewriting() && val.Op() == Str {
-			return c.Buf().Writer().Span(Str, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
+		if key == "x-type" && value == "upper" && c.Rewriting() && val.Op() == String {
+			return c.Buf().Writer().Span(String, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
 		}
 
 		return val, nil
@@ -634,7 +634,7 @@ func TestXTypeIDToObject(tb *testing.T) {
 		key := string(c.SchemaBuf().String(kids[0]))
 		value := string(c.SchemaBuf().String(kids[1]))
 
-		if key != "x-type" || value != "id" || !c.Rewriting() || val.Op() != Str {
+		if key != "x-type" || value != "id" || !c.Rewriting() || val.Op() != String {
 			return val, nil
 		}
 
@@ -684,7 +684,7 @@ func TestWalkFromJSON(tb *testing.T) {
 	}
 
 	h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
-		if val.Op() == Num {
+		if val.Op() == Number {
 			return c.Buf().Writer().FromJSON([]byte(`{"wrapped":5}`))
 		}
 
@@ -710,8 +710,8 @@ func TestWalkEmitArray(tb *testing.T) {
 	}
 
 	repl := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
-		if val.Op() == Num {
-			return c.Buf().Writer().Span(Num, []byte("42")), nil
+		if val.Op() == Number {
+			return c.Buf().Writer().Span(Number, []byte("42")), nil
 		}
 
 		return c.Apply(op, val, h)
@@ -747,9 +747,9 @@ func TestWalkEmit(tb *testing.T) {
 		emit            Opcode
 		bytes           string
 	}{
-		{`{}`, `5`, `42`, Num, `42`},
-		{`{}`, `"a"`, `"hi"`, Str, `"hi"`},
-		{`{"properties":{"a":{}}}`, `{"a":5,"b":7}`, `{"a":42,"b":7}`, Num, `42`}, // only governed scalar replaced
+		{`{}`, `5`, `42`, Number, `42`},
+		{`{}`, `"a"`, `"hi"`, String, `"hi"`},
+		{`{"properties":{"a":{}}}`, `{"a":5,"b":7}`, `{"a":42,"b":7}`, Number, `42`}, // only governed scalar replaced
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

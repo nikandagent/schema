@@ -85,9 +85,9 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 	case json2.Array:
 		return b.array(r, i, intern)
 	case json2.String, json2.Number:
-		op := Str
+		op := String
 		if tp == json2.Number {
-			op = Num
+			op = Number
 		}
 
 		j, err := d.Skip(r, i)
@@ -206,7 +206,7 @@ func (b BufferWriter) Bytes(s []byte) Opcode {
 	off := len(b.src) + len(b.text)
 	b.text = e.AppendString(b.text, s)
 
-	return makeNode(Str, off, len(b.src)+len(b.text)-off)
+	return makeNode(String, off, len(b.src)+len(b.text)-off)
 }
 
 func (b BufferWriter) String(s string) Opcode {
@@ -272,7 +272,7 @@ func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 	switch op.Op() {
 	case Null, True, False:
 		return op
-	case Num, Str:
+	case Number, String:
 		return b.Span(op, src.Span(op))
 	case Array, Object:
 		mark := len(b.tmp)
@@ -300,7 +300,7 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 		return append(w, "true"...)
 	case False:
 		return append(w, "false"...)
-	case Num, Str:
+	case Number, String:
 		return append(w, b.Span(val)...)
 	case IntLit:
 		return strconv.AppendInt(w, val.Imm(), 10)
@@ -355,7 +355,7 @@ func (b BufferReader) Span(op Opcode) []byte {
 
 func (b BufferReader) span(op Opcode) (off, end int) {
 	switch op.Op() {
-	case Num, Str, Null, False, True, Pattern, Ref, Key:
+	case Number, String, Null, False, True, Pattern, Ref, Key:
 		return op.SpanInt()
 	case None:
 		return 0, 0
@@ -390,7 +390,7 @@ func (b BufferReader) Nodes(op Opcode) []Opcode {
 // String returns decoded string as bytes.
 // Result lifetime is until any other method of that buffer is called.
 func (b BufferReader) String(op Opcode) []byte {
-	if op.Op() != Str {
+	if op.Op() != String {
 		panic(op)
 	}
 
@@ -417,7 +417,7 @@ func (b BufferReader) String(op Opcode) []byte {
 }
 
 func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
-	if op.Op() != Str {
+	if op.Op() != String {
 		panic(op)
 	}
 
@@ -449,7 +449,7 @@ func (b BufferReader) Int64(op Opcode) (int64, error) {
 		}
 
 		return int64(v), nil
-	case Num:
+	case Number:
 		sp := b.Span(op)
 
 		// Plain integer literals parse exactly (int64 outranges float64's integers);
@@ -479,7 +479,7 @@ func (b BufferReader) Float(op Opcode) (float64, error) {
 		return op.Flt(), nil
 	case IntLit:
 		return float64(op.Imm()), nil
-	case Num:
+	case Number:
 		return json2.Value(b.Span(op)).Float64()
 	default:
 		return 0, ErrNotNumber

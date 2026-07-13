@@ -440,7 +440,7 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 
-		if op == Required && val.Op() != Str {
+		if op == Required && val.Op() != String {
 			return 0, i, serr(`"required" entries must be strings`, Required, est, i-est, ErrKeyword)
 		}
 
@@ -522,7 +522,7 @@ func (s *Schema) kwNum(op Opcode, b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	if val.Op() != Num {
+	if val.Op() != Number {
 		return 0, i, serr(fmt.Sprintf("%q must be a number", keywordName(op)), op, st, i-st, ErrKeyword)
 	}
 
@@ -713,7 +713,7 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 		return 0, kend, err
 	}
 
-	key := makeNode(Str, kst, kend-kst)
+	key := makeNode(String, kst, kend-kst)
 
 	val, i, err := s.literal(b, st)
 	if err != nil {
