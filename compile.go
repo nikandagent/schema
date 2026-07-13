@@ -197,7 +197,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 
 	if !s.Flags.Is(SchemaKeepOrder) {
 		s.canonRequired(s.prog.tmp[mark:])
-		sortKeywords(s.prog.tmp[mark:])
+		s.sortKeywords(s.prog.tmp[mark:])
 	}
 
 	s.linkAdditional(s.prog.tmp[mark:])
@@ -723,7 +723,7 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, key, val)
 
-	return makeNode(op, off, 2), i, nil
+	return makeNode(op, off, 1), i, nil // one key/value pair
 }
 
 // isExtKeyword reports whether name is a custom "x-" keyword (x- plus a suffix).
@@ -938,7 +938,8 @@ func annotationKeyword(name []byte) bool {
 
 var keywordOrder = []Opcode{
 	Ref,
-	Type, Enum, Const,
+	Type, Ext,
+	Enum, Const,
 	Minimum, Maximum, ExclMin, ExclMax, MultipleOf,
 	MinLen, MaxLen, Pattern,
 	MinItems, MaxItems, Unique, Items,
@@ -946,6 +947,7 @@ var keywordOrder = []Opcode{
 	Not, AllOf, AnyOf, OneOf,
 	Default,
 	Defs,
+	Raw,
 }
 
 // mergeDefs folds several $defs/definitions blocks in one object into a single
@@ -982,11 +984,11 @@ func (s *Schema) mergeDefs(mark int) {
 // properties and patternProperties nodes, so apply can tell which keys are
 // already covered. Without either sibling the node keeps its lone subschema
 // (every property is additional).
-func (s *Schema) linkAdditional(and []Opcode) {
+func (s *Schema) linkAdditional(all []Opcode) {
 	var props, patterns Opcode
 	ai := -1
 
-	for i, op := range and {
+	for i, op := range all {
 		switch op.Op() {
 		case Properties:
 			props = op
@@ -1002,9 +1004,9 @@ func (s *Schema) linkAdditional(and []Opcode) {
 	}
 
 	off := len(s.prog.code)
-	s.prog.code = append(s.prog.code, props, patterns, s.prog.code[and[ai].Off()])
+	s.prog.code = append(s.prog.code, props, patterns, s.prog.code[all[ai].Off()])
 
-	and[ai] = makeNode(Additional, off, 3)
+	all[ai] = makeNode(Additional, off, 3)
 }
 
 // additionalParts splits an Additional node into its sibling properties and
@@ -1018,10 +1020,10 @@ func (s *Schema) additionalParts(op Opcode) (props, patterns, sub Opcode) {
 	return Pass, Pass, s.prog.code[op.Off()]
 }
 
-func (s *Schema) canonRequired(and []Opcode) {
+func (s *Schema) canonRequired(all []Opcode) {
 	var props, req Opcode
 
-	for _, op := range and {
+	for _, op := range all {
 		switch op.Op() {
 		case Properties:
 			props = op
@@ -1055,20 +1057,49 @@ func (s *Schema) propIndex(props, name Opcode) int {
 	return n
 }
 
-func sortKeywords(and []Opcode) {
-	for i := 1; i < len(and); i++ {
-		for j := i; j > 0 && keywordRank(and[j]) < keywordRank(and[j-1]); j-- {
-			and[j], and[j-1] = and[j-1], and[j]
+func (s *Schema) sortKeywords(all []Opcode) {
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && s.keywordLess(all[j], all[j-1]); j-- {
+			all[j], all[j-1] = all[j-1], all[j]
 		}
 	}
 }
 
-func keywordRank(op Opcode) int {
-	for i, k := range keywordOrder {
-		if k == op.Op() {
-			return i
+// keywordLess orders keywords by keywordRank, breaking ties by name for the only
+// repeatable keywords, Ext and Raw (every other keyword is unique per schema).
+func (s *Schema) keywordLess(a, b Opcode) bool {
+	ra, rb := s.keywordRank(a), s.keywordRank(b)
+	if ra != rb {
+		return ra < rb
+	}
+
+	if a.Op() != Ext && a.Op() != Raw {
+		return false
+	}
+
+	return string(s.prog.Reader().Span(s.prog.code[a.Off()])) < string(s.prog.Reader().Span(s.prog.code[b.Off()]))
+}
+
+// rawFront are annotation keywords we keep as Raw (no dedicated opcode) yet order
+// ahead of the real keywords; any other Raw ranks last, in Raw's keywordOrder slot.
+var rawFront = []string{"title", "description"}
+
+func (s *Schema) keywordRank(op Opcode) int {
+	if op.Op() == Raw {
+		name := s.prog.Reader().String(s.prog.code[op.Off()])
+
+		for i, k := range rawFront {
+			if string(name) == k {
+				return i
+			}
 		}
 	}
 
-	return len(keywordOrder)
+	for i, k := range keywordOrder {
+		if k == op.Op() {
+			return len(rawFront) + i
+		}
+	}
+
+	return len(rawFront) + len(keywordOrder)
 }

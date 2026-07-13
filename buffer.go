@@ -375,16 +375,102 @@ func (b BufferReader) span(op Opcode) (off, end int) {
 	return 0, 0
 }
 
-// Nodes unwraps block node. Result slice is owned by Buffer.
+// Nodes unwraps a container node into its child words. Result slice is owned by
+// Buffer. Panics on a node that is not a container (single-child pointers like
+// Not/Items/Const are references, not containers).
 func (b BufferReader) Nodes(op Opcode) []Opcode {
-	off, n := op.Off(), op.Arg()
+	off, n := op.OffInt(), op.ArgInt()
 
 	switch op.Op() {
-	case Object, Properties, PatternProps, Defs:
-		n *= 2 // pair-blocks: key/pattern + subschema per entry
+	case Object, Properties, PatternProps, Defs, Raw, Ext:
+		n *= 2 // pair-blocks: key + subschema per entry
+	case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+		// list-blocks: one child per entry
+	default:
+		panic(op.Op())
 	}
 
 	return b.code[off : off+n]
+}
+
+func (b BufferReader) NodesLen(op Opcode) int {
+	return op.ArgInt()
+}
+
+func (b BufferReader) NodesAt(op Opcode, i int) (k, v Opcode) {
+	off, n := op.OffInt(), op.ArgInt()
+	if i < 0 {
+		i = n + i
+	}
+	if i >= n || i < 0 {
+		return None, None
+	}
+
+	switch op.Op() {
+	case Object, Properties, PatternProps, Defs, Raw, Ext:
+		i *= 2 // kv-pairs
+
+		return b.code[off+i], b.code[off+i+1]
+	case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+		return MakeInt(int64(i)), b.code[off+i]
+	default:
+		panic(op.Op())
+	}
+}
+
+// Ext returns the value node of the extension keyword named key (e.g. "x-type")
+// among the keywords of schema node op (an All), or None if absent. The key is
+// matched whole, so any extension prefix falls into the same path. The value is
+// left to the caller to interpret; None is never a valid value.
+func (b BufferReader) Ext(op Opcode, key string) Opcode {
+	if op.Op() != All {
+		panic(op.Op())
+	}
+
+	for _, ch := range b.Nodes(op) {
+		if ch.Op() != Ext {
+			continue
+		}
+
+		k, v := b.NodesAt(ch, 0)
+		if string(b.String(k)) == key {
+			return v
+		}
+	}
+
+	return None
+}
+
+// Keyword returns the keyword node of kind want among the keywords of schema
+// node op (an All), or None if absent. Every keyword is unique per schema, so the
+// match is unambiguous — except Ext and Raw, which repeat and are keyed by name;
+// look those up with Ext instead. Read the returned node with Deref, Nodes, or
+// its Imm, per the keyword.
+func (b BufferReader) Keyword(op, want Opcode) Opcode {
+	if op.Op() != All {
+		panic(op.Op())
+	}
+
+	for _, ch := range b.Nodes(op) {
+		if ch.Op() == want.Op() {
+			return ch
+		}
+	}
+
+	return None
+}
+
+// Deref returns the single child of a pointer node — the subschema or operand it
+// points at (Not/Items/Const/Default/Minimum/…). These hold one reference, not a
+// list, so it panics on any other op. Additional is variadic — split it with
+// additionalParts instead.
+func (b BufferReader) Deref(op Opcode) Opcode {
+	switch op.Op() {
+	case Not, Items, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+		return b.code[op.OffInt()]
+	default:
+		panic(op.Op())
+	}
 }
 
 // String returns decoded string as bytes.

@@ -31,9 +31,14 @@ func TestFormat(tb *testing.T) {
 		{in: `{"pattern":"^a.*$"}`},
 		{in: `{"type":"string","pattern":"^a.*z$"}`},
 		{in: `{"default":{"x":1},"type":"object"}`, out: `{"type":"object","default":{"x":1}}`},
-		{in: `{"title":"x","description":"y","type":"string"}`, out: `{"type":"string","title":"x","description":"y"}`},
+		{in: `{"title":"x","description":"y","type":"string"}`},
 		{in: `{"x-foo":{"a":[1,2]},"type":"object"}`, out: `{"type":"object","x-foo":{"a":[1,2]}}`},
 		{in: `{"$ref":"#"}`},
+
+		{in: `{"x-zeta":1,"x-alpha":2,"type":"string"}`, out: `{"type":"string","x-alpha":2,"x-zeta":1}`},
+		{in: `{"format":"email","$comment":"c","type":"string"}`, out: `{"type":"string","$comment":"c","format":"email"}`},
+		{in: `{"format":"email","x-foo":1,"description":"d","title":"t","type":"string"}`,
+			out: `{"title":"t","description":"d","type":"string","x-foo":1,"format":"email"}`},
 
 		{in: `{"properties":{"a":{"type":"integer"},"b":{"type":"string"}},"required":["b","a"]}`,
 			out: `{"properties":{"a":{"type":"integer"},"b":{"type":"string"}},"required":["a","b"]}`},
