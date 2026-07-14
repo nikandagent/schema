@@ -323,7 +323,7 @@ func TestWalkRead(tb *testing.T) {
 	}
 
 	h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
-		collect(c.Buf().Reader(), val)
+		collect(c.Buffer().Reader(), val)
 		return c.Apply(op, val, h)
 	}
 
@@ -359,12 +359,12 @@ func TestWalkSchemaBuf(tb *testing.T) {
 		if op.Op() == Properties {
 			saw = true
 
-			ns := c.SchemaBuf().Nodes(op)
+			ns := c.SchemaReader().Nodes(op)
 			if len(ns) != 2*int(op.Arg()) {
 				tb.Errorf("properties nodes: got %d words, want %d (arg=%d)", len(ns), 2*op.Arg(), op.Arg())
 			}
 
-			if got := string(c.SchemaBuf().Span(ns[0])); got != `"a"` {
+			if got := string(c.SchemaReader().Span(ns[0])); got != `"a"` {
 				tb.Errorf("first property key: got %q, want %q", got, `"a"`)
 			}
 		}
@@ -558,12 +558,12 @@ func TestXHook(tb *testing.T) {
 
 		rewriting = c.Rewriting()
 
-		kids := c.SchemaBuf().Nodes(op)
-		key := string(c.SchemaBuf().String(kids[0]))
-		value := string(c.SchemaBuf().String(kids[1]))
+		kids := c.SchemaReader().Nodes(op)
+		key := string(c.SchemaReader().String(kids[0]))
+		value := string(c.SchemaReader().String(kids[1]))
 
 		if key == "x-type" && value == "upper" && c.Rewriting() && val.Op() == String {
-			return c.Buf().Writer().Span(String, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
+			return c.Buffer().Writer().Span(String, bytes.ToUpper(c.Buffer().Reader().Span(val))), nil
 		}
 
 		return val, nil
@@ -630,18 +630,18 @@ func TestXTypeIDToObject(tb *testing.T) {
 			return c.Apply(op, val, h)
 		}
 
-		kids := c.SchemaBuf().Nodes(op)
-		key := string(c.SchemaBuf().String(kids[0]))
-		value := string(c.SchemaBuf().String(kids[1]))
+		kids := c.SchemaReader().Nodes(op)
+		key := string(c.SchemaReader().String(kids[0]))
+		value := string(c.SchemaReader().String(kids[1]))
 
 		if key != "x-type" || value != "id" || !c.Rewriting() || val.Op() != String {
 			return val, nil
 		}
 
 		// String() bytes are transient; string(...) copies them out.
-		entity, ver, _ := strings.Cut(string(c.Buf().Reader().String(val)), "/")
+		entity, ver, _ := strings.Cut(string(c.Buffer().Reader().String(val)), "/")
 
-		w := c.Buf().Writer()
+		w := c.Buffer().Writer()
 		kv := []Opcode{w.Bytes([]byte("entity")), w.Bytes([]byte(entity))}
 
 		if n, _ := strconv.Atoi(ver); n != 0 {
@@ -685,7 +685,7 @@ func TestWalkFromJSON(tb *testing.T) {
 
 	h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if val.Op() == Number {
-			return c.Buf().Writer().FromJSON([]byte(`{"wrapped":5}`))
+			return c.Buffer().Writer().FromJSON([]byte(`{"wrapped":5}`))
 		}
 
 		return c.Apply(op, val, h)
@@ -711,7 +711,7 @@ func TestWalkEmitArray(tb *testing.T) {
 
 	repl := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 		if val.Op() == Number {
-			return c.Buf().Writer().Span(Number, []byte("42")), nil
+			return c.Buffer().Writer().Span(Number, []byte("42")), nil
 		}
 
 		return c.Apply(op, val, h)
@@ -759,7 +759,7 @@ func TestWalkEmit(tb *testing.T) {
 
 		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
 			if val.Op() == tc.emit {
-				return c.Buf().Writer().Span(tc.emit, []byte(tc.bytes)), nil
+				return c.Buffer().Writer().Span(tc.emit, []byte(tc.bytes)), nil
 			}
 
 			return c.Apply(op, val, h)
@@ -853,7 +853,7 @@ func TestWalkFilterDiags(tb *testing.T) {
 		}
 
 		dp := c.DataPath()
-		if len(dp) != 0 && string(c.Buf().Reader().String(dp[len(dp)-1])) == "b" {
+		if len(dp) != 0 && string(c.Buffer().Reader().String(dp[len(dp)-1])) == "b" {
 			c.SetDiags(c.Diags()[:mark])
 		}
 

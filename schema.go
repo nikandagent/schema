@@ -57,9 +57,9 @@ func (f *Flags) Unset(g Flags)  { *f &^= g }
 // Root is the compiled program's root node; walk it with SchemaBuf.
 func (s *Schema) Root() Opcode { return s.root }
 
-// SchemaBuf is the program arena (read-only): the nodes and bytes the schema
+// Reader is the program arena (read-only): the nodes and bytes the schema
 // keywords point into. Pair with Root to traverse the program.
-func (s *Schema) SchemaBuf() BufferReader { return s.prog.Reader() }
+func (s *Schema) Reader() BufferReader { return s.prog.Reader() }
 
 // word: payload:56 | shape:3 | code:5
 //

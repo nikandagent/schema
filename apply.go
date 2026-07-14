@@ -98,9 +98,9 @@ func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (_ Op
 	return res, a, err
 }
 
-func (a *Applier) Buf() *Buffer            { return &a.b }
-func (a *Applier) SchemaBuf() BufferReader { return a.s.prog.Reader() }
-func (a *Applier) Rewriting() bool         { return a.rewrite }
+func (a *Applier) Buffer() *Buffer            { return &a.b }
+func (a *Applier) SchemaReader() BufferReader { return a.s.prog.Reader() }
+func (a *Applier) Rewriting() bool            { return a.rewrite }
 
 // Diags is the accumulated diagnostics so far; its length marks the point before
 // a subtree ran. SetDiags writes back a filtered slice — snapshot len(Diags()),
