@@ -20,7 +20,7 @@ func TestBufferNodesLen(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	ext := b.Keyword(s.Root(), Ext)
 	if n := b.NodesLen(ext); n != 1 {
@@ -39,7 +39,7 @@ func TestBufferNodesAt(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	ext := b.Keyword(s.Root(), Ext)
 
@@ -72,7 +72,7 @@ func TestBufferNodesPanic(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	typ := b.Keyword(s.Root(), Type)
 	mustPanic(tb, "Nodes(Type)", func() { b.Nodes(typ) })
@@ -89,7 +89,7 @@ func TestBufferExt(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	if v := b.Ext(s.Root(), "x-type"); string(b.String(v)) != "custom" {
 		tb.Errorf("ext x-type: got %q, want %q", b.String(v), "custom")
@@ -109,7 +109,7 @@ func TestBufferKeyword(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	if op := b.Keyword(s.Root(), Type); op.Op() != Type {
 		tb.Errorf("keyword Type: got %v", op.Op())
@@ -129,7 +129,7 @@ func TestBufferIter(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	var names []string
 	for k, v := range b.Iter(b.Keyword(s.Root(), Properties)) {
@@ -143,7 +143,7 @@ func TestBufferIter(tb *testing.T) {
 	}
 
 	n := 0
-	for k, _ := range b.Iter(b.Keyword(s.Root(), AllOf)) {
+	for k := range b.Iter(b.Keyword(s.Root(), AllOf)) {
 		if k.ImmInt() != n {
 			tb.Errorf("allOf index: got %d, want %d", k.ImmInt(), n)
 		}
@@ -154,7 +154,7 @@ func TestBufferIter(tb *testing.T) {
 	}
 
 	n = 0
-	for k, _ := range b.Iter(b.Keyword(s.Root(), Not)) {
+	for k := range b.Iter(b.Keyword(s.Root(), Not)) {
 		n++
 		if k != None {
 			tb.Errorf("not key: got %v, want None", k)
@@ -207,7 +207,7 @@ func TestBufferDeref(tb *testing.T) {
 			continue
 		}
 
-		b := s.SchemaBuf()
+		b := s.Reader()
 
 		ch := b.Deref(b.Keyword(s.Root(), tc.want))
 		if ch.Op() != tc.kind {
@@ -223,7 +223,7 @@ func TestBufferDeref(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	b := s.SchemaBuf()
+	b := s.Reader()
 
 	mustPanic(tb, "Deref(Properties)", func() { b.Deref(b.Keyword(s.Root(), Properties)) })
 	mustPanic(tb, "Deref(Type)", func() { b.Deref(b.Keyword(s.Root(), Type)) })

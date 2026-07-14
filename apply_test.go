@@ -359,12 +359,12 @@ func TestWalkSchemaBuf(tb *testing.T) {
 		if op.Op() == Properties {
 			saw = true
 
-			ns := c.SchemaBuf().Nodes(op)
+			ns := c.SchemaReader().Nodes(op)
 			if len(ns) != 2*int(op.Arg()) {
 				tb.Errorf("properties nodes: got %d words, want %d (arg=%d)", len(ns), 2*op.Arg(), op.Arg())
 			}
 
-			if got := string(c.SchemaBuf().Span(ns[0])); got != `"a"` {
+			if got := string(c.SchemaReader().Span(ns[0])); got != `"a"` {
 				tb.Errorf("first property key: got %q, want %q", got, `"a"`)
 			}
 		}
@@ -558,9 +558,9 @@ func TestXHook(tb *testing.T) {
 
 		rewriting = c.Rewriting()
 
-		kids := c.SchemaBuf().Nodes(op)
-		key := string(c.SchemaBuf().String(kids[0]))
-		value := string(c.SchemaBuf().String(kids[1]))
+		kids := c.SchemaReader().Nodes(op)
+		key := string(c.SchemaReader().String(kids[0]))
+		value := string(c.SchemaReader().String(kids[1]))
 
 		if key == "x-type" && value == "upper" && c.Rewriting() && val.Op() == String {
 			return c.Buf().Writer().Span(String, bytes.ToUpper(c.Buf().Reader().Span(val))), nil
@@ -630,9 +630,9 @@ func TestXTypeIDToObject(tb *testing.T) {
 			return c.Apply(op, val, h)
 		}
 
-		kids := c.SchemaBuf().Nodes(op)
-		key := string(c.SchemaBuf().String(kids[0]))
-		value := string(c.SchemaBuf().String(kids[1]))
+		kids := c.SchemaReader().Nodes(op)
+		key := string(c.SchemaReader().String(kids[0]))
+		value := string(c.SchemaReader().String(kids[1]))
 
 		if key != "x-type" || value != "id" || !c.Rewriting() || val.Op() != String {
 			return val, nil
