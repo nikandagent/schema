@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+const diagHandlerSaysNo = UserDiagBase + iota
+
 func TestValidate(tb *testing.T) {
 	for _, tc := range []struct {
 		schema, data string
@@ -251,11 +253,11 @@ func TestWalk(tb *testing.T) {
 
 	// 4. c.Fail records the verdict in a diag; ErrBreak is swallowed, so err is nil.
 	rep := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
-		c.Fail(op, val, "handler says no")
+		c.Fail(diagHandlerSaysNo, op, val)
 		return val, ErrBreak
 	}
 
-	if d, err := s.Walk([]byte(`"x"`), rep); err != nil || len(d) != 1 || d[0].Message != "handler says no" {
+	if d, err := s.Walk([]byte(`"x"`), rep); err != nil || len(d) != 1 || d[0].Code != diagHandlerSaysNo {
 		tb.Errorf("Fail: err=%v diag=%+v", err, d)
 	}
 }
@@ -869,7 +871,7 @@ func TestWalkFilterDiags(tb *testing.T) {
 		tb.Fatalf("diags=%d, want 1 (b suppressed, a kept)", len(d))
 	}
 
-	if d[0].Message != "wrong type" {
-		tb.Errorf("message=%q", d[0].Message)
+	if d[0].Code != TypeMismatch {
+		tb.Errorf("code=%v", d[0].Code)
 	}
 }

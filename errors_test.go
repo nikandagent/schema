@@ -9,19 +9,19 @@ import (
 
 func TestError(tb *testing.T) {
 	for _, tc := range []struct {
-		in   string
-		want error
-		msg  string
-		pref bool // msg is a prefix
+		in     string
+		want   error
+		code   DiagCode
+		reason string // substring expected in err.Error(), wrapped from Err
 	}{
-		{`{"minLength":"x"}`, ErrKeyword, `"minLength" must be an integer`, false},
-		{`{"type":123}`, ErrKeyword, `"type" must be a string or array of type names`, false},
-		{`{"uniqueItems":1}`, ErrKeyword, "", false},
-		{`{"pattern":"("}`, ErrPattern, `"(" is not a valid regular expression:`, true},
-		{`{"$ref":123}`, ErrKeyword, "", false},
-		{`{"$ref":""}`, ErrKeyword, "", false},
-		{`{"$ref":"#/$defs/missing"}`, ErrRef, `"#/$defs/missing"`, false},
-		{`123`, ErrKeyword, `a schema must be an object or a boolean`, false},
+		{`{"minLength":"x"}`, ErrKeyword, MustBeInteger, ""},
+		{`{"type":123}`, ErrKeyword, InvalidTypeShape, ""},
+		{`{"uniqueItems":1}`, ErrKeyword, MustBeBool, ""},
+		{`{"pattern":"("}`, ErrPattern, BadPattern, "missing closing )"},
+		{`{"$ref":123}`, ErrKeyword, MustBeString, ""},
+		{`{"$ref":""}`, ErrKeyword, EmptyRef, ""},
+		{`{"$ref":"#/$defs/missing"}`, ErrRef, UnresolvedRef, ""},
+		{`123`, ErrKeyword, SchemaMustBeObject, ""},
 	} {
 		var s Schema
 
@@ -40,21 +40,15 @@ func TestError(tb *testing.T) {
 		if !errors.Is(err, tc.want) {
 			tb.Errorf("compile %q: err %v, want Is(%v)", tc.in, err, tc.want)
 		}
-		if e.Message == "" {
-			tb.Errorf("compile %q: empty Message", tc.in)
+		if e.Diag.Code != tc.code {
+			tb.Errorf("compile %q: Code %v, want %v", tc.in, e.Diag.Code, tc.code)
 		}
 		if e.Err == nil {
 			tb.Errorf("compile %q: nil Err", tc.in)
 		}
 
-		if tc.msg != "" {
-			if tc.pref {
-				if !strings.HasPrefix(e.Message, tc.msg) {
-					tb.Errorf("compile %q: Message %q, want prefix %q", tc.in, e.Message, tc.msg)
-				}
-			} else if e.Message != tc.msg {
-				tb.Errorf("compile %q: Message %q, want %q", tc.in, e.Message, tc.msg)
-			}
+		if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
+			tb.Errorf("compile %q: err %q, want contains %q", tc.in, err.Error(), tc.reason)
 		}
 	}
 
@@ -78,8 +72,8 @@ func TestError(tb *testing.T) {
 		if !errors.As(err, &e) {
 			tb.Fatalf(`$ref missing: err %v is not *Error`, err)
 		}
-		if !(e.Off > 0 && e.End-e.Off == len("#/$defs/missing")) {
-			tb.Errorf(`$ref missing: Off=%d End=%d, want Off>0 len=%d`, e.Off, e.End, len("#/$defs/missing"))
+		if !(e.Diag.Off > 0 && e.Diag.End-e.Diag.Off == len("#/$defs/missing")) {
+			tb.Errorf(`$ref missing: Off=%d End=%d, want Off>0 len=%d`, e.Diag.Off, e.Diag.End, len("#/$defs/missing"))
 		}
 	}
 	{
@@ -90,8 +84,8 @@ func TestError(tb *testing.T) {
 		if !errors.As(err, &e) {
 			tb.Fatalf(`minLength: err %v is not *Error`, err)
 		}
-		if !(e.Off > 0 && e.End > e.Off) {
-			tb.Errorf(`minLength: Off=%d End=%d, want Off>0 End>Off`, e.Off, e.End)
+		if !(e.Diag.Off > 0 && e.Diag.End > e.Diag.Off) {
+			tb.Errorf(`minLength: Off=%d End=%d, want Off>0 End>Off`, e.Diag.Off, e.Diag.End)
 		}
 	}
 
@@ -224,8 +218,8 @@ func TestFormatNicely(tb *testing.T) {
 	{
 		data := `{"tags":[1]}`
 		d := one(`{"properties":{"tags":{"type":"array","minItems":2}}}`, data)
-		if d.Message != "too few items" {
-			tb.Fatalf("C: base message %q, want %q", d.Message, "too few items")
+		if d.Code != TooFewItems {
+			tb.Fatalf("C: base code %v, want %v", d.Code, TooFewItems)
 		}
 
 		got := string(d.FormatNicelyContext(nil, []byte(data), 50, 50))
@@ -271,19 +265,19 @@ func TestFormatNicely(tb *testing.T) {
 
 	// E. Clamping and oversized context must not panic.
 	{
-		got := string(Diag{Off: 0, End: 0, Message: "no location"}.FormatNicelyContext(nil, nil, 5, 5))
-		if !strings.Contains(got, "^ No location") {
+		got := string(Diag{Off: 0, End: 0, Code: TypeMismatch}.FormatNicelyContext(nil, nil, 5, 5))
+		if !strings.Contains(got, "^ Wrong type") {
 			tb.Errorf("E empty: %q", got)
 		}
 
-		got = string(Diag{Off: 2, End: 100, Message: "past end"}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
-		if !strings.Contains(got, "^ Past end") {
+		got = string(Diag{Off: 2, End: 100, Code: TooFewItems}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
+		if !strings.Contains(got, "^ Too few items") {
 			tb.Errorf("E overrun: %q", got)
 		}
 
 		// Large before/after on a short src: caret indent stays small because start
 		// clamps to 0, so pad never approaches the 128-wide spaces constant.
-		got = string(Diag{Off: 1, End: 2, Message: "wide"}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
+		got = string(Diag{Off: 1, End: 2, Code: TooLong}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
 		lines := strings.SplitN(got, "\n", 2)
 		if indent := strings.IndexByte(lines[1], '^'); indent != 1 {
 			tb.Errorf("E wide: caret indent %d, want 1 (stayed within 128): %q", indent, got)

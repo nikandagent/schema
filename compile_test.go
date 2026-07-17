@@ -8,28 +8,28 @@ import (
 
 func TestKeywordTypeErrors(tb *testing.T) {
 	for _, tc := range []struct {
-		in  string
-		msg string
+		in   string
+		code DiagCode
 	}{
-		{`{"type":"qweqwe"}`, `"type" contains an unknown type name`},
-		{`{"type":["object","qweqwe"]}`, `"type" contains an unknown type name`},
+		{`{"type":"qweqwe"}`, UnknownType},
+		{`{"type":["object","qweqwe"]}`, UnknownType},
 
-		{`{"minimum":"abc"}`, `"minimum" must be a number`},
-		{`{"minimum":true}`, `"minimum" must be a number`},
-		{`{"maximum":[1]}`, `"maximum" must be a number`},
-		{`{"exclusiveMinimum":{}}`, `"exclusiveMinimum" must be a number`},
-		{`{"exclusiveMaximum":"x"}`, `"exclusiveMaximum" must be a number`},
-		{`{"multipleOf":"x"}`, `"multipleOf" must be a number`},
+		{`{"minimum":"abc"}`, MustBeNumber},
+		{`{"minimum":true}`, MustBeNumber},
+		{`{"maximum":[1]}`, MustBeNumber},
+		{`{"exclusiveMinimum":{}}`, MustBeNumber},
+		{`{"exclusiveMaximum":"x"}`, MustBeNumber},
+		{`{"multipleOf":"x"}`, MustBeNumber},
 
-		{`{"required":[1,2]}`, `"required" entries must be strings`},
-		{`{"required":"name"}`, `"required" must be an array`},
-		{`{"enum":5}`, `"enum" must be an array`},
-		{`{"properties":123}`, `"properties" must be an object`},
-		{`{"patternProperties":1}`, `"patternProperties" must be an object`},
-		{`{"$defs":1}`, `"$defs" must be an object`},
-		{`{"allOf":1}`, `"allOf" must be an array`},
-		{`{"anyOf":"x"}`, `"anyOf" must be an array`},
-		{`{"oneOf":true}`, `"oneOf" must be an array`},
+		{`{"required":[1,2]}`, RequiredNotString},
+		{`{"required":"name"}`, MustBeArray},
+		{`{"enum":5}`, MustBeArray},
+		{`{"properties":123}`, MustBeObject},
+		{`{"patternProperties":1}`, MustBeObject},
+		{`{"$defs":1}`, MustBeObject},
+		{`{"allOf":1}`, MustBeArray},
+		{`{"anyOf":"x"}`, MustBeArray},
+		{`{"oneOf":true}`, MustBeArray},
 	} {
 		var s Schema
 
@@ -48,11 +48,8 @@ func TestKeywordTypeErrors(tb *testing.T) {
 		if !errors.Is(err, ErrKeyword) {
 			tb.Errorf("compile %q: err %v, want Is(ErrKeyword)", tc.in, err)
 		}
-		if e.Message == "" {
-			tb.Errorf("compile %q: empty Message", tc.in)
-		}
-		if e.Message != tc.msg {
-			tb.Errorf("compile %q: Message %q, want %q", tc.in, e.Message, tc.msg)
+		if e.Diag.Code != tc.code {
+			tb.Errorf("compile %q: Code %v, want %v", tc.in, e.Diag.Code, tc.code)
 		}
 	}
 }

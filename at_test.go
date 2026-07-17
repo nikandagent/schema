@@ -12,7 +12,7 @@ import (
 func found(doc []byte, d []Diag) []string {
 	out := make([]string, 0, len(d))
 	for _, x := range d {
-		out = append(out, x.Message+"@"+string(doc[x.Off:x.End]))
+		out = append(out, x.Code.String()+"@"+string(doc[x.Off:x.End]))
 	}
 	sort.Strings(out)
 	return out
@@ -112,10 +112,10 @@ func TestAtUnresolved(tb *testing.T) {
 
 // wantMismatch asserts a single kind-mismatch diag whose location is
 // out-of-document (0,0) — the offending At segment has no source position.
-func wantMismatch(tb *testing.T, d []Diag, msg string) {
+func wantMismatch(tb *testing.T, d []Diag, code DiagCode) {
 	tb.Helper()
-	if len(d) != 1 || d[0].Message != msg {
-		tb.Fatalf("diags = %v, want one %q", d, msg)
+	if len(d) != 1 || d[0].Code != code {
+		tb.Fatalf("diags = %v, want one %v", d, code)
 	}
 	if d[0].Off != 0 || d[0].End != 0 {
 		tb.Errorf("location = [%d,%d], want out-of-document (0,0)", d[0].Off, d[0].End)
@@ -133,7 +133,7 @@ func TestAtKeyIntoArray(tb *testing.T) {
 	if err != nil {
 		tb.Fatalf("unexpected error: %v", err)
 	}
-	wantMismatch(tb, d, "schema is array, val supposes object")
+	wantMismatch(tb, d, InvalidArrayIndex)
 }
 
 // TestAtIndexIntoObject is the mirror: an int step where the schema is an object
@@ -146,7 +146,7 @@ func TestAtIndexIntoObject(tb *testing.T) {
 	if err != nil {
 		tb.Fatalf("unexpected error: %v", err)
 	}
-	wantMismatch(tb, d, "schema is object, val supposes array")
+	wantMismatch(tb, d, InvalidObjectKey)
 }
 
 // TestAtConformance: assigning a value whose shape contradicts the schema is a

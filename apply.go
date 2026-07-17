@@ -147,7 +147,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	switch op.Op() {
 	case Pass:
 	case Fail:
-		a.Fail(op, val, "schema forbids any value")
+		a.Fail(Forbidden, op, val)
 	case All:
 		off, n := op.Off(), op.Arg()
 
@@ -167,57 +167,57 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		a.checkRequired(op, val)
 	case MinProps:
 		if val.Op() == Object && val.Arg() < op.Imm() {
-			a.Fail(op, val, "too few properties")
+			a.Fail(TooFewProps, op, val)
 		}
 	case MaxProps:
 		if val.Op() == Object && val.Arg() > op.Imm() {
-			a.Fail(op, val, "too many properties")
+			a.Fail(TooManyProps, op, val)
 		}
 	case Items:
 		return a.checkItems(op, val, h)
 	case MinItems:
 		if val.Op() == Array && val.Arg() < op.Imm() {
-			a.Fail(op, val, "too few items")
+			a.Fail(TooFewItems, op, val)
 		}
 	case MaxItems:
 		if val.Op() == Array && val.Arg() > op.Imm() {
-			a.Fail(op, val, "too many items")
+			a.Fail(TooManyItems, op, val)
 		}
 	case Unique:
 		a.checkUnique(op, val)
 	case MinLen:
 		if val.Op() == String && a.strlen(val) < op.Imm() {
-			a.Fail(op, val, "too short")
+			a.Fail(TooShort, op, val)
 		}
 	case MaxLen:
 		if val.Op() == String && a.strlen(val) > op.Imm() {
-			a.Fail(op, val, "too long")
+			a.Fail(TooLong, op, val)
 		}
 	case Minimum:
 		if val.Op() == Number && a.number(val) < a.schemaNum(op) {
-			a.Fail(op, val, "less than minimum")
+			a.Fail(BelowMinimum, op, val)
 		}
 	case Maximum:
 		if val.Op() == Number && a.number(val) > a.schemaNum(op) {
-			a.Fail(op, val, "greater than maximum")
+			a.Fail(AboveMaximum, op, val)
 		}
 	case ExclMin:
 		if val.Op() == Number && a.number(val) <= a.schemaNum(op) {
-			a.Fail(op, val, "not above exclusive minimum")
+			a.Fail(BelowMinimumExcl, op, val)
 		}
 	case ExclMax:
 		if val.Op() == Number && a.number(val) >= a.schemaNum(op) {
-			a.Fail(op, val, "not below exclusive maximum")
+			a.Fail(AboveMaximumExcl, op, val)
 		}
 	case MultipleOf:
 		if val.Op() == Number && !a.multipleOf(op, val) {
-			a.Fail(op, val, "not a multiple")
+			a.Fail(NotMultipleOf, op, val)
 		}
 	case Enum:
 		a.checkEnum(op, val)
 	case Const:
 		if !a.equalLit(val, a.s.prog.code[op.Off()]) {
-			a.Fail(op, val, "not the const value")
+			a.Fail(MustConst, op, val)
 		}
 	case Not:
 		ok, err := a.matches(a.s.prog.code[op.Off()], val, h)
@@ -226,7 +226,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		}
 
 		if ok {
-			a.Fail(op, val, "matches a forbidden schema")
+			a.Fail(MustNotMatch, op, val)
 		}
 	case AllOf:
 		off, n := op.Off(), op.Arg()
@@ -266,7 +266,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		return a.checkPatternProps(op, val, h)
 	case Pattern:
 		if val.Op() == String && !a.s.patterns[op].Match(a.b.Reader().String(val)) {
-			a.Fail(op, val, "does not match pattern")
+			a.Fail(PatternMismatch, op, val)
 		}
 	case Raw, Ext, Default, Defs:
 		// Raw/Ext are kept only for round-trip (a Walk handler acts on Ext);
@@ -303,7 +303,7 @@ func (a *Applier) checkType(op, val Opcode) {
 	}
 
 	if !ok {
-		a.Fail(op, val, "wrong type")
+		a.Fail(TypeMismatch, op, val)
 	}
 }
 
@@ -314,7 +314,7 @@ func (a *Applier) checkProps(op, val Opcode, h Handler) (Opcode, error) {
 	case None, Key, Each:
 		// ok
 	case IntLit:
-		a.Fail(op, None, "schema is object, val supposes array")
+		a.Fail(InvalidObjectKey, op, None)
 		return val, nil
 	default:
 		panic(seek)
@@ -678,7 +678,7 @@ func (a *Applier) checkRequired(op, val Opcode) {
 
 	for i := range n {
 		if _, _, ok := a.member(val, a.s.prog.code[off+i]); !ok {
-			a.Fail(op, val, "missing required property")
+			a.Fail(MissingRequired, op, val)
 		}
 	}
 }
@@ -694,7 +694,7 @@ func (a *Applier) checkItems(op, val Opcode, h Handler) (Opcode, error) {
 	case None, Each, IntLit:
 		// ok
 	case Key:
-		a.Fail(op, None, "schema is array, val supposes object")
+		a.Fail(InvalidArrayIndex, op, None)
 		return val, nil
 	default:
 		panic(seek)
@@ -748,7 +748,7 @@ func (a *Applier) checkUnique(op, val Opcode) {
 	for i := range vn {
 		for j := i + 1; j < vn; j++ {
 			if equalBuf(a.b.Reader(), a.b.code[voff+i], a.b.Reader(), a.b.code[voff+j]) {
-				a.Fail(op, val, "duplicate items")
+				a.Fail(DuplicateItems, op, val)
 				return
 			}
 		}
@@ -764,7 +764,7 @@ func (a *Applier) checkEnum(op, val Opcode) {
 		}
 	}
 
-	a.Fail(op, val, "not in enum")
+	a.Fail(MustMatchEnum, op, val)
 }
 
 func (a *Applier) checkAnyOf(op, val Opcode, h Handler) error {
@@ -781,7 +781,7 @@ func (a *Applier) checkAnyOf(op, val Opcode, h Handler) error {
 		}
 	}
 
-	a.Fail(op, val, "matches none of the schemas")
+	a.Fail(MustMatchAny, op, val)
 
 	return nil
 }
@@ -802,7 +802,7 @@ func (a *Applier) checkOneOf(op, val Opcode, h Handler) error {
 	}
 
 	if cnt != 1 {
-		a.Fail(op, val, "must match exactly one schema")
+		a.Fail(MustMatchOne, op, val)
 	}
 
 	return nil
@@ -892,9 +892,9 @@ func (a *Applier) strlen(val Opcode) int64 {
 	return int64(rs)
 }
 
-func (a *Applier) Fail(op, val Opcode, msg string) {
+func (a *Applier) Fail(code DiagCode, op, val Opcode) {
 	off, end := a.b.Reader().span(val)
-	a.diag = append(a.diag, Diag{Off: off, End: end, Op: op.Op(), Message: msg})
+	a.diag = append(a.diag, Diag{Code: code, Op: op.Op(), Off: off, End: end})
 }
 
 func (a *Applier) seeking() Opcode {

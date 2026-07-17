@@ -118,8 +118,6 @@ const (
 	SrcOff
 	SrcSpan
 	Each
-
-	bad // internal: unresolved ref/anchor target
 )
 
 const (

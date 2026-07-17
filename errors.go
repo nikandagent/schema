@@ -9,17 +9,19 @@ import (
 
 type (
 	Error struct {
-		Message  string
-		Off, End int
-		Op       Opcode
-		Err      error
+		Diag Diag
+		Err  error
 	}
 
 	Diag struct {
-		Message  string
-		Off, End int
+		Code     DiagCode
 		Op       Opcode
+		Off, End int
 	}
+
+	// DiagCode classifies a validation failure. The app switches on it and
+	// renders its own text; String gives the built-in default message.
+	DiagCode int
 
 	// Diagnostics carries validation diagnostics as an error, so a caller can return
 	// them through a plain error result and recover them higher up the stack with
@@ -29,6 +31,110 @@ type (
 )
 
 const spaces = "                                                                                                                                "
+
+const (
+	TypeMismatch DiagCode = iota + 1
+	TooShort
+	TooLong
+	BelowMinimum
+	AboveMaximum
+	BelowMinimumExcl
+	AboveMaximumExcl
+	NotMultipleOf
+	TooFewItems
+	TooManyItems
+	DuplicateItems
+	TooFewProps
+	TooManyProps
+	MissingRequired
+	MustMatchEnum
+	MustConst
+	PatternMismatch
+	MustNotMatch
+	MustMatchAny
+	MustMatchOne
+	Forbidden
+	InvalidObjectKey
+	InvalidArrayIndex
+
+	// compile-time codes
+	SchemaMustBeObject
+	InvalidTypeShape
+	UnknownType
+	MustBeObject
+	MustBeArray
+	RequiredNotString
+	MustBeNumber
+	MustBeInteger
+	MustBeBool
+	MustBeString
+	EmptyRef
+	DuplicateAnchor
+	UnresolvedRef
+	NoResolver
+	BadPattern
+	UnknownKeyword
+	UnsupportedKeyword
+	InvalidAtKey
+)
+
+// UserDiagBase is the first DiagCode reserved for application use. A Walk handler
+// defines its own codes as UserDiagBase + n (n >= 0); the library never assigns or
+// renders these, so String returns "" and the app formats them itself.
+const UserDiagBase DiagCode = 1 << 16
+
+var diagText = [...]string{
+	TypeMismatch:      "wrong type",
+	TooShort:          "too short",
+	TooLong:           "too long",
+	BelowMinimum:      "less than minimum",
+	AboveMaximum:      "greater than maximum",
+	BelowMinimumExcl:  "not above exclusive minimum",
+	AboveMaximumExcl:  "not below exclusive maximum",
+	NotMultipleOf:     "not a multiple",
+	TooFewItems:       "too few items",
+	TooManyItems:      "too many items",
+	DuplicateItems:    "duplicate items",
+	TooFewProps:       "too few properties",
+	TooManyProps:      "too many properties",
+	MissingRequired:   "missing required property",
+	MustMatchEnum:     "not in enum",
+	MustConst:         "not the const value",
+	PatternMismatch:   "does not match pattern",
+	MustNotMatch:      "matches a forbidden schema",
+	MustMatchAny:      "matches none of the schemas",
+	MustMatchOne:      "must match exactly one schema",
+	Forbidden:         "schema forbids any value",
+	InvalidObjectKey:  "object indexed as array",
+	InvalidArrayIndex: "array keyed as object",
+
+	SchemaMustBeObject: "a schema must be an object or a boolean",
+	InvalidTypeShape:   `"type" must be a string or array of type names`,
+	UnknownType:        `"type" contains an unknown type name`,
+	MustBeObject:       "must be an object",
+	MustBeArray:        "must be an array",
+	RequiredNotString:  `"required" entries must be strings`,
+	MustBeNumber:       "must be a number",
+	MustBeInteger:      "must be an integer",
+	MustBeBool:         "must be a boolean",
+	MustBeString:       "must be a string",
+	EmptyRef:           `"$ref" must not be empty`,
+	DuplicateAnchor:    "duplicate $anchor",
+	UnresolvedRef:      "not found",
+	NoResolver:         "no resolver",
+	BadPattern:         "invalid regular expression",
+	UnknownKeyword:     "unknown keyword",
+	UnsupportedKeyword: "unsupported keyword",
+	InvalidAtKey:       "invalid At key",
+}
+
+func (c DiagCode) String() string {
+	if int(c) < 0 || int(c) >= len(diagText) {
+		return ""
+	}
+
+	return diagText[c]
+}
 
 // JSON-shape errors, reused from the decoder.
 var (
@@ -52,9 +158,10 @@ var (
 	ErrUnsupported    = errors.New("unsupported keyword")
 	ErrPattern        = errors.New("invalid pattern")
 	ErrRef            = errors.New("unresolved ref")
+	ErrOption         = errors.New("invalid option")
 )
 
-func (e *Error) Error() string { return e.Err.Error() + ": " + e.Message }
+func (e *Error) Error() string { return fmt.Sprintf("%v (%v)", e.Err, e.Diag.Code) }
 func (e *Error) Unwrap() error { return e.Err }
 
 // FormatNicely appends the snippet(s) with a default context width.
@@ -115,7 +222,7 @@ func (d Diag) FormatNicelyContext(w, src []byte, before, after int) []byte {
 
 	w = append(w, spaces[:pad]...)
 	w = append(w, '^', ' ')
-	w = appendCapitalized(w, d.Message)
+	w = appendCapitalized(w, d.Code.String())
 
 	return append(w, '\n')
 }
@@ -146,9 +253,9 @@ func (e Diagnostics) Error() string {
 	case 0:
 		return "invalid document"
 	case 1:
-		return "invalid document: " + e[0].Message
+		return "invalid document: " + e[0].Code.String()
 	default:
-		return fmt.Sprintf("invalid document: %s (+%d more)", e[0].Message, len(e)-1)
+		return fmt.Sprintf("invalid document: %s (+%d more)", e[0].Code.String(), len(e)-1)
 	}
 }
 
@@ -198,9 +305,10 @@ func normSyntax(err error) error {
 	return err
 }
 
-// serr builds a schema Error: a user-facing message, the offending keyword op
-// (None if none) and its span in the schema source (off plus length n, stored as
-// a half-open Off/End), and a category sentinel.
-func serr(msg string, op Opcode, off, n int, kind error) *Error {
-	return &Error{Message: msg, Op: op.Op(), Off: off, End: off + n, Err: kind}
+// serr builds a schema Error: a diagnostic (the classifying code, the offending
+// keyword op — None if none — and its span in the schema source, off plus length
+// n stored as a half-open Off/End) and a category sentinel. Specifics beyond the
+// code are recovered from op and the span, or carried in kind.
+func serr(code DiagCode, op Opcode, off, n int, kind error) *Error {
+	return &Error{Diag: Diag{Code: code, Op: op.Op(), Off: off, End: off + n}, Err: kind}
 }

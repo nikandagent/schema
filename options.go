@@ -37,10 +37,7 @@ func At(p ...any) Option {
 			} else if key == Each {
 				op = Each
 			} else {
-				return &Error{
-					Message: "Invalid At key",
-					Op:      None,
-				}
+				return serr(InvalidAtKey, None, 0, 0, ErrOption)
 			}
 
 			c.at = append(c.at, op)
