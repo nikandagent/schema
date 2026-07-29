@@ -123,7 +123,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		}
 
 		return append(w, ']')
-	case AllOf, AnyOf, OneOf:
+	case AllOf, AnyOf, OneOf, Prefix:
 		off, n := op.Off(), op.Arg()
 
 		w = append(w, '[')
@@ -244,6 +244,8 @@ func keywordName(op Opcode) string {
 		return "multipleOf"
 	case Items:
 		return "items"
+	case Prefix:
+		return "prefixItems"
 	case Additional:
 		return "additionalProperties"
 	case Not:

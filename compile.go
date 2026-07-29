@@ -201,6 +201,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 
 	s.linkAdditional(s.prog.tmp[mark:])
 	s.linkCond(s.prog.tmp[mark:])
+	s.linkItems(s.prog.tmp[mark:])
 
 	n := len(s.prog.tmp) - mark
 	off := len(s.prog.code)
@@ -252,6 +253,8 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 		return s.kwNum(MultipleOf, b, st)
 	case "items":
 		return s.kwSub(Items, b, st)
+	case "prefixItems":
+		return s.kwSchemas(Prefix, b, st)
 	case "additionalProperties":
 		return s.kwSub(Additional, b, st)
 	case "not":
@@ -927,7 +930,7 @@ func typeBit(name []byte) int {
 func unsupportedKeyword(name []byte) bool {
 	switch string(name) {
 	case "contains", "minContains", "maxContains",
-		"propertyNames", "prefixItems",
+		"propertyNames",
 		"dependentSchemas", "dependentRequired", "dependencies",
 		"unevaluatedItems", "unevaluatedProperties",
 		"$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor":
@@ -957,7 +960,7 @@ var keywordOrder = []Opcode{
 	Enum, Const,
 	Minimum, Maximum, ExclMin, ExclMax, MultipleOf,
 	MinLen, MaxLen, Pattern,
-	MinItems, MaxItems, Unique, Items,
+	MinItems, MaxItems, Unique, Prefix, Items,
 	MinProps, MaxProps, Properties, Required, PatternProps, Additional,
 	Not, AllOf, AnyOf, OneOf,
 	If, Then, Else,
@@ -1034,6 +1037,40 @@ func (s *Schema) additionalParts(op Opcode) (props, patterns, sub Opcode) {
 	}
 
 	return Pass, Pass, s.prog.code[op.Off()]
+}
+
+// linkItems gives an items node a reference to its sibling prefixItems, so apply
+// knows how many leading items are already covered.
+func (s *Schema) linkItems(all []Opcode) {
+	var prefix Opcode
+	ii := -1
+
+	for i, op := range all {
+		switch op.Op() {
+		case Prefix:
+			prefix = op
+		case Items:
+			ii = i
+		}
+	}
+
+	if ii < 0 || prefix.Op() != Prefix {
+		return
+	}
+
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.code[all[ii].Off()], prefix)
+
+	all[ii] = makeNode(Items, off, 2)
+}
+
+func (s *Schema) itemsParts(op Opcode) (prefix, sub Opcode) {
+	if op.Arg() == 2 {
+		o := op.Off()
+		return s.prog.code[o+1], s.prog.code[o]
+	}
+
+	return Pass, s.prog.code[op.Off()]
 }
 
 func (s *Schema) linkCond(all []Opcode) {

@@ -458,7 +458,7 @@ func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
 					return
 				}
 			}
-		case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+		case All, AllOf, AnyOf, OneOf, Prefix, Enum, Required, Array:
 			for i := range op.ArgInt() {
 				if !yield(MakeInt(int64(i)), b.code[off+i]) {
 					return

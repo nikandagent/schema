@@ -38,6 +38,16 @@ func TestFormat(tb *testing.T) {
 			out: `{"type":"number","allOf":[{"type":"number"}],"if":{"type":"string"},"else":{"type":"integer"},"default":1}`},
 		{in: `{"properties":{"a":{"if":{"type":"string"},"then":{"minLength":2}}}}`},
 
+		{in: `{"prefixItems":[{"type":"integer"},{"type":"string"}]}`},
+		{in: `{"prefixItems":[true,false]}`},
+		{in: `{"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`},
+		{in: `{"prefixItems":[{"type":"integer"}],"items":false}`},
+		{in: `{"items":{"type":"string"},"prefixItems":[{"type":"integer"}]}`,
+			out: `{"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`},
+		{in: `{"items":{"type":"string"},"maxItems":3,"prefixItems":[{"type":"integer"}],"minItems":1}`,
+			out: `{"minItems":1,"maxItems":3,"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`},
+		{in: `{"properties":{"a":{"prefixItems":[{"prefixItems":[{"type":"integer"}],"items":false}],"items":{"type":"string"}}}}`},
+
 		{in: `{"pattern":"^a.*$"}`},
 		{in: `{"type":"string","pattern":"^a.*z$"}`},
 		{in: `{"default":{"x":1},"type":"object"}`, out: `{"type":"object","default":{"x":1}}`},

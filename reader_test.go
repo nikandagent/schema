@@ -206,6 +206,28 @@ func TestBufferIter(tb *testing.T) {
 		tb.Errorf("if condition: got %q", got)
 	}
 
+	p, err := Compile([]byte(`{"prefixItems":[{"type":"integer"},{"type":"string"}],"items":{"type":"number"}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	pb := p.Reader()
+
+	n = 0
+	for k, v := range pb.Iter(pb.Keyword(p.Root(), Prefix)) {
+		if k.ImmInt() != n || v.Op() != All {
+			tb.Errorf("prefixItems %d: got %v/%v, want %d/All", n, k, v.Op(), n)
+		}
+		n++
+	}
+	if n != 2 {
+		tb.Errorf("prefixItems count: got %d, want 2", n)
+	}
+
+	if got := string(p.FormatNode(nil, pb.Deref(pb.Keyword(p.Root(), Items)))); got != `{"type":"number"}` {
+		tb.Errorf("linked items sub: got %q", got)
+	}
+
 	n = 0
 	for range b.Iter(b.Keyword(s.Root(), Properties)) {
 		n++
@@ -231,6 +253,8 @@ func TestBufferDeref(tb *testing.T) {
 		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Then, All, ""},
 		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Else, All, ""},
 		{`{"if":{"type":"string"}}`, If, All, ""},
+		{`{"prefixItems":[{"type":"integer"}],"items":{"type":"number"}}`, Items, All, ""},
+		{`{"prefixItems":[{"type":"integer"}],"items":false}`, Items, Fail, ""},
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

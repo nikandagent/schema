@@ -173,6 +173,8 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		if val.Op() == Object && val.Arg() > op.Imm() {
 			a.Fail(TooManyProps, op, val)
 		}
+	case Prefix:
+		return a.checkPrefix(op, val, h)
 	case Items:
 		return a.checkItems(op, val, h)
 	case MinItems:
@@ -692,6 +694,22 @@ func (a *Applier) checkItems(op, val Opcode, h Handler) (Opcode, error) {
 		return val, nil
 	}
 
+	prefix, sub := a.s.itemsParts(op)
+
+	return a.eachItem(op, val, Pass, sub, prefix.ArgInt(), val.ArgInt(), h)
+}
+
+func (a *Applier) checkPrefix(op, val Opcode, h Handler) (Opcode, error) {
+	if val.Op() != Array {
+		return val, nil
+	}
+
+	return a.eachItem(op, val, op, Pass, 0, op.ArgInt(), h)
+}
+
+// eachItem applies prefix[i] to item i while i < len(prefix), sub to the rest,
+// over the index range [first, last).
+func (a *Applier) eachItem(op, val, prefix, sub Opcode, first, last int, h Handler) (Opcode, error) {
 	seek := a.seeking()
 
 	switch seek.Op() {
@@ -707,23 +725,29 @@ func (a *Applier) checkItems(op, val Opcode, h Handler) (Opcode, error) {
 	mark := len(a.b.tmp)
 	defer func() { a.b.tmp = a.b.tmp[:mark] }()
 
-	sub := a.s.prog.code[op.Off()]
-	voff, vn := val.Off(), val.Arg()
+	poff, pn := prefix.OffInt(), prefix.ArgInt()
+	voff, vn := val.OffInt(), val.ArgInt()
 	dirty := false
 
-	target := seek.Imm()
+	target := seek.ImmInt()
 	if target < 0 {
 		target += vn
 	}
 
 	for i := range vn {
-		if seek.Op() == IntLit && i != target {
+		v := a.b.code[voff+i]
+
+		sch := sub
+		if i < pn {
+			sch = a.s.prog.code[poff+i]
+		}
+
+		if i < first || i >= last || (seek.Op() == IntLit && i != target) {
+			a.b.tmp = append(a.b.tmp, v)
 			continue
 		}
 
-		v := a.b.code[voff+i]
-
-		nv, err := a.applyChild(sub, v, makeImm(IntLit, int(i)), h)
+		nv, err := a.applyChild(sch, v, makeImm(IntLit, i), h)
 		if err != nil {
 			return val, err
 		}

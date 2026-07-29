@@ -144,6 +144,7 @@ const (
 	Required
 	Array
 	Not
+	Prefix
 	Items
 	Additional
 	Const

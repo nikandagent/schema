@@ -91,6 +91,31 @@ func TestValidate(tb *testing.T) {
 		{`{"if":{"properties":{"k":{"const":"a"}},"required":["k"]},"then":{"required":["av"]},"else":{"required":["bv"]}}`, `{"k":"a","bv":1}`, false},
 		{`{"if":{"properties":{"k":{"const":"a"}},"required":["k"]},"then":{"required":["av"]},"else":{"required":["bv"]}}`, `{"k":"b","bv":1}`, true},
 
+		{`{"prefixItems":[{"type":"integer"},{"type":"string"}]}`, `[1,"x"]`, true},
+		{`{"prefixItems":[{"type":"integer"},{"type":"string"}]}`, `["x",1]`, false},
+		{`{"prefixItems":[{"type":"integer"},{"type":"string"}]}`, `[1]`, true}, // shorter than the tuple
+		{`{"prefixItems":[{"type":"integer"}]}`, `[1,"x",null]`, true},          // tail unconstrained
+		{`{"prefixItems":[{"type":"integer"}]}`, `[]`, true},
+		{`{"prefixItems":[{"type":"integer"}]}`, `{"0":"x"}`, true}, // not an array
+		{`{"prefixItems":[true,false]}`, `[1]`, true},
+		{`{"prefixItems":[true,false]}`, `[1,2]`, false},
+		{`{"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`, `[1,"a","b"]`, true},
+		{`{"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`, `[1,"a",2]`, false},
+		{`{"prefixItems":[{"type":"integer"}],"items":{"type":"string"}}`, `["a","a"]`, false},
+		{`{"items":{"type":"string"},"prefixItems":[{"type":"integer"}]}`, `[1,"a"]`, true},
+		{`{"prefixItems":[{"type":"integer"}],"items":false}`, `[1]`, true},
+		{`{"prefixItems":[{"type":"integer"}],"items":false}`, `[1,2]`, false},
+		{`{"prefixItems":[{"type":"integer"},{"type":"integer"}],"minItems":2}`, `[1]`, false},
+		{`{"prefixItems":[{"type":"integer"},{"type":"integer"}],"maxItems":1}`, `[1,2]`, false},
+
+		{`{"properties":{"a":{"prefixItems":[{"type":"integer"}]}}}`, `{"a":[1,"x"]}`, true},
+		{`{"properties":{"a":{"prefixItems":[{"type":"integer"}]}}}`, `{"a":["x"]}`, false},
+		{`{"prefixItems":[{"prefixItems":[{"type":"integer"}]}]}`, `[[1,"x"],"y"]`, true},
+		{`{"prefixItems":[{"prefixItems":[{"type":"integer"}]}]}`, `[["x"],"y"]`, false},
+		{`{"if":{"prefixItems":[{"const":"a"}]},"then":{"minItems":2}}`, `["a",1]`, true},
+		{`{"if":{"prefixItems":[{"const":"a"}]},"then":{"minItems":2}}`, `["a"]`, false},
+		{`{"if":{"prefixItems":[{"const":"a"}]},"then":{"minItems":2}}`, `["b"]`, true},
+
 		{
 			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
 			`{"items":[{"id":1},{"id":2}]}`, true,
@@ -153,6 +178,12 @@ func TestRewriteDefault(tb *testing.T) {
 		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}},"else":{"properties":{"c":{"default":3}}}}`, `{"a":1}`, `{"a":1,"b":2}`},
 		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}},"else":{"properties":{"c":{"default":3}}}}`, `{"z":1}`, `{"z":1,"c":3}`},
 		{`{"then":{"properties":{"b":{"default":2}}}}`, `{}`, `{}`}, // no if: branch never runs
+
+		{`{"prefixItems":[{"properties":{"a":{"default":1}}}]}`, `[{},{}]`, `[{"a":1},{}]`},
+		{`{"prefixItems":[{},{"properties":{"a":{"default":1}}}]}`, `[{},{}]`, `[{},{"a":1}]`},
+		{`{"prefixItems":[{"properties":{"a":{"default":1}}}]}`, `[{},{},{}]`, `[{"a":1},{},{}]`},
+		{`{"prefixItems":[{}],"items":{"properties":{"a":{"default":1}}}}`, `[{},{},{}]`, `[{},{"a":1},{"a":1}]`},
+		{`{"prefixItems":[{"properties":{"a":{"default":1}}}],"items":{"properties":{"b":{"default":2}}}}`, `[{},{}]`, `[{"a":1},{"b":2}]`},
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

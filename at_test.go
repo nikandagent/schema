@@ -86,6 +86,61 @@ func TestAt(tb *testing.T) {
 	run("title as bytes", []Option{At([]byte("title"))}, "wrong type@99")
 }
 
+func TestAtPrefixItems(tb *testing.T) {
+	sc := mustCompile(tb, `{"prefixItems":[{"type":"integer"},{"type":"string"}],"items":{"type":"boolean"}}`)
+	doc := []byte(`["a",1,2,3]`)
+
+	run := func(name string, opts []Option, want ...string) {
+		d, err := sc.Walk(doc, nil, opts...)
+		if err != nil {
+			tb.Errorf("%s: unexpected error: %v", name, err)
+			return
+		}
+		wantSet(tb, name, doc, d, want...)
+	}
+
+	run("whole", nil, "wrong type@\"a\"", "wrong type@1", "wrong type@2", "wrong type@3")
+	run("[0]", []Option{At(0)}, "wrong type@\"a\"")
+	run("[1]", []Option{At(1)}, "wrong type@1")
+	run("[2]", []Option{At(2)}, "wrong type@2")
+	run("[-1]", []Option{At(-1)}, "wrong type@3")
+	run("[]", []Option{At(Each)}, "wrong type@\"a\"", "wrong type@1", "wrong type@2", "wrong type@3")
+
+	ok := mustCompile(tb, `{"prefixItems":[{"type":"string"},{"type":"integer"}],"items":{"type":"integer"}}`)
+	if d, err := ok.Walk(doc, nil, At(2)); err != nil || len(d) != 0 {
+		tb.Errorf("valid tail item: diag=%v, err=%v", found(doc, d), err)
+	}
+}
+
+// TestAtRewritePrefixItems pins that scoping a rewrite to one index still emits
+// every item: the seek skip must copy the untouched ones through.
+func TestAtRewritePrefixItems(tb *testing.T) {
+	sc := mustCompile(tb, `{"prefixItems":[{"properties":{"a":{"default":1}}},{"properties":{"b":{"default":2}}}],"items":{"properties":{"c":{"default":3}}}}`)
+	sc.Flags.Set(KeepKeyOrder)
+
+	for _, tc := range []struct {
+		name string
+		opts []Option
+		out  string
+	}{
+		{"whole", nil, `[{"a":1},{"b":2},{"c":3}]`},
+		{"[0]", []Option{At(0)}, `[{"a":1},{},{}]`},
+		{"[1]", []Option{At(1)}, `[{},{"b":2},{}]`},
+		{"[2]", []Option{At(2)}, `[{},{},{"c":3}]`},
+		{"[-1]", []Option{At(-1)}, `[{},{},{"c":3}]`},
+	} {
+		out, _, err := sc.Rewrite(nil, []byte(`[{},{},{}]`), tc.opts...)
+		if err != nil {
+			tb.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+
+		if got := string(out); got != tc.out {
+			tb.Errorf("%s: got %s, want %s", tc.name, got, tc.out)
+		}
+	}
+}
+
 // TestAtUnresolved: a path that doesn't resolve (missing key, out-of-range index,
 // wrong-kind step) scopes to no value — no diags, no error — matching how an
 // unscoped walk never visits a location that isn't there.
