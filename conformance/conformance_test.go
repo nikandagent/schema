@@ -109,7 +109,8 @@ func rejectsCleanly(err error) bool {
 	}
 
 	var e *schema.Error
-	return errors.As(err, &e) && e.Message != ""
+	return errors.As(err, &e) &&
+		(e.Diag.Code == schema.UnknownKeyword || e.Diag.Code == schema.UnsupportedKeyword)
 }
 
 func validates(s *schema.Schema, c suiteCase) bool {
