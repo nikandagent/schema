@@ -244,6 +244,10 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		if err := a.checkOneOf(op, val, h); err != nil {
 			return val, err
 		}
+	case If:
+		return a.checkCond(op, val, h)
+	case Then, Else:
+		// consumed by the sibling If
 	case Ref:
 		// An external ref lives in another document's program arena; swap it in for
 		// the subtree (the data arena c.b stays put), then restore.
@@ -806,6 +810,21 @@ func (a *Applier) checkOneOf(op, val Opcode, h Handler) error {
 	}
 
 	return nil
+}
+
+func (a *Applier) checkCond(op, val Opcode, h Handler) (Opcode, error) {
+	cond, then, els := a.s.condParts(op)
+
+	ok, err := a.matches(cond, val, h)
+	if err != nil {
+		return val, err
+	}
+
+	if ok {
+		return a.apply(then, val, h)
+	}
+
+	return a.apply(els, val, h)
 }
 
 // matches calls apply, but drops diag messages.

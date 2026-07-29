@@ -471,7 +471,7 @@ func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
 			}
 
 			yield(None, b.code[off])
-		case Not, Items, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+		case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 			yield(None, b.code[off])
 		}
 	}
@@ -502,7 +502,7 @@ func (b BufferReader) Keyword(op, want Opcode) Opcode {
 // additionalParts instead.
 func (b BufferReader) Deref(op Opcode) Opcode {
 	switch op.Op() {
-	case Not, Items, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+	case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 		return b.code[op.OffInt()]
 	default:
 		panic(op.Op())

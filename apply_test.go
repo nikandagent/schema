@@ -62,6 +62,35 @@ func TestValidate(tb *testing.T) {
 		{`{"allOf":[{"type":"integer"},{"minimum":5}]}`, `7`, true},
 		{`{"allOf":[{"type":"integer"},{"minimum":5}]}`, `3`, false},
 
+		{`{"if":{"type":"string"},"then":{"minLength":2}}`, `"ab"`, true},
+		{`{"if":{"type":"string"},"then":{"minLength":2}}`, `"a"`, false},
+		{`{"if":{"type":"string"},"then":{"minLength":2}}`, `1`, true}, // condition failing is not itself a diag
+		{`{"if":{"type":"string"},"else":{"minimum":3}}`, `"a"`, true},
+		{`{"if":{"type":"string"},"else":{"minimum":3}}`, `5`, true},
+		{`{"if":{"type":"string"},"else":{"minimum":3}}`, `1`, false},
+		{`{"if":{"minimum":10},"then":{"multipleOf":5},"else":{"multipleOf":2}}`, `15`, true},
+		{`{"if":{"minimum":10},"then":{"multipleOf":5},"else":{"multipleOf":2}}`, `11`, false},
+		{`{"if":{"minimum":10},"then":{"multipleOf":5},"else":{"multipleOf":2}}`, `4`, true},
+		{`{"if":{"minimum":10},"then":{"multipleOf":5},"else":{"multipleOf":2}}`, `3`, false},
+
+		{`{"then":{"type":"string"}}`, `1`, true}, // no if: branch ignored
+		{`{"else":{"type":"string"}}`, `1`, true},
+		{`{"then":{"type":"string"},"else":{"type":"boolean"}}`, `1`, true},
+		{`{"if":{"type":"string"}}`, `1`, true}, // no branches: condition is inert
+		{`{"if":{"type":"string"}}`, `"x"`, true},
+
+		{`{"properties":{"a":{"if":{"type":"string"},"then":{"minLength":2}}}}`, `{"a":"xy"}`, true},
+		{`{"properties":{"a":{"if":{"type":"string"},"then":{"minLength":2}}}}`, `{"a":"x"}`, false},
+		{`{"properties":{"a":{"if":{"type":"string"},"then":{"minLength":2}}}}`, `{"a":1}`, true},
+		{`{"allOf":[{"if":{"type":"integer"},"then":{"minimum":5}},{"if":{"type":"integer"},"else":{"type":"string"}}]}`, `7`, true},
+		{`{"allOf":[{"if":{"type":"integer"},"then":{"minimum":5}},{"if":{"type":"integer"},"else":{"type":"string"}}]}`, `3`, false},
+		{`{"allOf":[{"if":{"type":"integer"},"then":{"minimum":5}},{"if":{"type":"integer"},"else":{"type":"string"}}]}`, `true`, false},
+		{`{"allOf":[{"if":{"type":"integer"},"then":{"minimum":5}},{"if":{"type":"integer"},"else":{"type":"string"}}]}`, `"x"`, true},
+
+		{`{"if":{"properties":{"k":{"const":"a"}},"required":["k"]},"then":{"required":["av"]},"else":{"required":["bv"]}}`, `{"k":"a","av":1}`, true},
+		{`{"if":{"properties":{"k":{"const":"a"}},"required":["k"]},"then":{"required":["av"]},"else":{"required":["bv"]}}`, `{"k":"a","bv":1}`, false},
+		{`{"if":{"properties":{"k":{"const":"a"}},"required":["k"]},"then":{"required":["av"]},"else":{"required":["bv"]}}`, `{"k":"b","bv":1}`, true},
+
 		{
 			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","required":["id"]}}}}`,
 			`{"items":[{"id":1},{"id":2}]}`, true,
@@ -116,6 +145,14 @@ func TestRewriteDefault(tb *testing.T) {
 		{`{"properties":{"a":{"type":"integer"}}}`, `{}`, `{}`}, // no default, no insert
 
 		{`{"properties":{"o":{"properties":{"x":{"default":1}}}}}`, `{"o":{}}`, `{"o":{"x":1}}`}, // nested
+
+		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}}}`, `{"a":1}`, `{"a":1,"b":2}`},
+		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}}}`, `{"c":1}`, `{"c":1}`}, // condition false: branch not taken
+		{`{"if":{"required":["a"]},"else":{"properties":{"b":{"default":2}}}}`, `{"c":1}`, `{"c":1,"b":2}`},
+		{`{"if":{"required":["a"]},"else":{"properties":{"b":{"default":2}}}}`, `{"a":1}`, `{"a":1}`},
+		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}},"else":{"properties":{"c":{"default":3}}}}`, `{"a":1}`, `{"a":1,"b":2}`},
+		{`{"if":{"required":["a"]},"then":{"properties":{"b":{"default":2}}},"else":{"properties":{"c":{"default":3}}}}`, `{"z":1}`, `{"z":1,"c":3}`},
+		{`{"then":{"properties":{"b":{"default":2}}}}`, `{}`, `{}`}, // no if: branch never runs
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

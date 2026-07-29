@@ -179,6 +179,33 @@ func TestBufferIter(tb *testing.T) {
 		tb.Errorf("type: yielded a pair, want none")
 	}
 
+	c, err := Compile([]byte(`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	cb := c.Reader()
+
+	for _, kw := range []Opcode{If, Then, Else} {
+		n = 0
+
+		for k, v := range cb.Iter(cb.Keyword(c.Root(), kw)) {
+			n++
+
+			if k != None || v.Op() != All {
+				tb.Errorf("%v: got %v/%v, want None/All", kw, k, v.Op())
+			}
+		}
+
+		if n != 1 {
+			tb.Errorf("%v count: got %d, want 1", kw, n)
+		}
+	}
+
+	if got := string(c.FormatNode(nil, cb.Deref(cb.Keyword(c.Root(), If)))); got != `{"type":"string"}` {
+		tb.Errorf("if condition: got %q", got)
+	}
+
 	n = 0
 	for range b.Iter(b.Keyword(s.Root(), Properties)) {
 		n++
@@ -200,6 +227,10 @@ func TestBufferDeref(tb *testing.T) {
 		{`{"items":{"type":"number"}}`, Items, All, ""},
 		{`{"const":5}`, Const, Number, "5"},
 		{`{"minimum":3}`, Minimum, Number, "3"},
+		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, If, All, ""},
+		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Then, All, ""},
+		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Else, All, ""},
+		{`{"if":{"type":"string"}}`, If, All, ""},
 	} {
 		s, err := Compile([]byte(tc.schema))
 		if err != nil {

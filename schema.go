@@ -159,6 +159,10 @@ const (
 	Defs
 	Raw
 	Ext // custom "x-" keyword: an inert Raw-like pair, acted on only in a Walk handler
+
+	If
+	Then
+	Else
 )
 
 func makeNode(op Opcode, off, n int) Opcode {

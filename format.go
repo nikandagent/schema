@@ -158,8 +158,11 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		}
 
 		return append(w, '}')
-	case Items, Not:
+	case Items, Not, Then, Else:
 		return s.format(w, s.prog.code[op.Off()])
+	case If:
+		cond, _, _ := s.condParts(op)
+		return s.format(w, cond)
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
 		return strconv.AppendInt(w, op.Imm(), 10)
 	case Unique:
@@ -245,6 +248,12 @@ func keywordName(op Opcode) string {
 		return "additionalProperties"
 	case Not:
 		return "not"
+	case If:
+		return "if"
+	case Then:
+		return "then"
+	case Else:
+		return "else"
 	case AllOf:
 		return "allOf"
 	case AnyOf:

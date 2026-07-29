@@ -482,8 +482,8 @@ func TestRejectUnknownKeywords(tb *testing.T) {
 	}{
 		{`{"nope":1}`, 0, true},
 		{`{"nope":1}`, SchemaRejectUnknown, false},
-		{`{"if":{"type":"string"}}`, SchemaRejectUnknown, true},      // recognized, kept for round-trip
-		{`{"if":{"type":"string"}}`, SchemaRejectUnsupported, false}, // recognized-but-unimplemented, rejected
+		{`{"contains":{"type":"string"}}`, SchemaRejectUnknown, true},      // recognized, kept for round-trip
+		{`{"contains":{"type":"string"}}`, SchemaRejectUnsupported, false}, // recognized-but-unimplemented, rejected
 		{`{"nope":1}`, SchemaRejectUnsupported, true},                // genuine unknown, not a target of this flag
 	} {
 		s := Schema{Flags: tc.flags}

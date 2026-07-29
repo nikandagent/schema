@@ -200,6 +200,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	}
 
 	s.linkAdditional(s.prog.tmp[mark:])
+	s.linkCond(s.prog.tmp[mark:])
 
 	n := len(s.prog.tmp) - mark
 	off := len(s.prog.code)
@@ -255,6 +256,12 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 		return s.kwSub(Additional, b, st)
 	case "not":
 		return s.kwSub(Not, b, st)
+	case "if":
+		return s.kwSub(If, b, st)
+	case "then":
+		return s.kwSub(Then, b, st)
+	case "else":
+		return s.kwSub(Else, b, st)
 	case "allOf":
 		return s.kwSchemas(AllOf, b, st)
 	case "anyOf":
@@ -919,8 +926,7 @@ func typeBit(name []byte) int {
 // ErrUnsupported under SchemaRejectUnsupported.
 func unsupportedKeyword(name []byte) bool {
 	switch string(name) {
-	case "if", "then", "else",
-		"contains", "minContains", "maxContains",
+	case "contains", "minContains", "maxContains",
 		"propertyNames", "prefixItems",
 		"dependentSchemas", "dependentRequired", "dependencies",
 		"unevaluatedItems", "unevaluatedProperties",
@@ -954,6 +960,7 @@ var keywordOrder = []Opcode{
 	MinItems, MaxItems, Unique, Items,
 	MinProps, MaxProps, Properties, Required, PatternProps, Additional,
 	Not, AllOf, AnyOf, OneOf,
+	If, Then, Else,
 	Default,
 	Defs,
 	Raw,
@@ -1027,6 +1034,48 @@ func (s *Schema) additionalParts(op Opcode) (props, patterns, sub Opcode) {
 	}
 
 	return Pass, Pass, s.prog.code[op.Off()]
+}
+
+func (s *Schema) linkCond(all []Opcode) {
+	ii, ti, ei := -1, -1, -1
+
+	for i, op := range all {
+		switch op.Op() {
+		case If:
+			ii = i
+		case Then:
+			ti = i
+		case Else:
+			ei = i
+		}
+	}
+
+	if ii < 0 || (ti < 0 && ei < 0) {
+		return
+	}
+
+	then, els := Pass, Pass
+
+	if ti >= 0 {
+		then = s.prog.code[all[ti].Off()]
+	}
+	if ei >= 0 {
+		els = s.prog.code[all[ei].Off()]
+	}
+
+	off := len(s.prog.code)
+	s.prog.code = append(s.prog.code, s.prog.code[all[ii].Off()], then, els)
+
+	all[ii] = makeNode(If, off, 3)
+}
+
+func (s *Schema) condParts(op Opcode) (cond, then, els Opcode) {
+	if op.Arg() == 3 {
+		o := op.Off()
+		return s.prog.code[o], s.prog.code[o+1], s.prog.code[o+2]
+	}
+
+	return s.prog.code[op.Off()], Pass, Pass
 }
 
 func (s *Schema) canonRequired(all []Opcode) {
