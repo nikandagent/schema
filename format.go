@@ -166,6 +166,10 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
 		return strconv.AppendInt(w, op.Imm(), 10)
 	case Unique:
+		if op.Imm() == 0 {
+			return append(w, "false"...)
+		}
+
 		return append(w, "true"...)
 	case Pattern:
 		return append(w, s.prog.Reader().Span(op)...)

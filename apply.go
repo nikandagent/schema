@@ -186,7 +186,9 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 			a.Fail(TooManyItems, op, val)
 		}
 	case Unique:
-		a.checkUnique(op, val)
+		if op.Imm() != 0 {
+			a.checkUnique(op, val)
+		}
 	case MinLen:
 		if val.Op() == String && a.strlen(val) < op.Imm() {
 			a.Fail(TooShort, op, val)

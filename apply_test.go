@@ -46,6 +46,7 @@ func TestValidate(tb *testing.T) {
 		{`{"minItems":2}`, `[1]`, false},
 		{`{"uniqueItems":true}`, `[1,2,1]`, false},
 		{`{"uniqueItems":true}`, `[1,2,"1"]`, true},
+		{`{"uniqueItems":false}`, `[1,2,1]`, true},
 
 		{`{"enum":[1,"x"]}`, `"x"`, true},
 		{`{"enum":[1,"x"]}`, `2`, false},

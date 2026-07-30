@@ -15,6 +15,7 @@ func TestFormat(tb *testing.T) {
 		{in: `{"minimum":1,"maximum":9,"multipleOf":3}`},
 		{in: `{"minLength":2,"maxLength":5}`},
 		{in: `{"minItems":0,"maxItems":10,"uniqueItems":true}`},
+		{in: `{"uniqueItems":false}`}, // inert, but preserved: compile never discards
 		{in: `{"minProperties":1,"maxProperties":3}`},
 		{in: `{"properties":{"a":{"type":"integer"}},"required":["a"]}`},
 		{in: `{"enum":[1,"x",null,true]}`},

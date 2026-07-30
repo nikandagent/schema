@@ -28,16 +28,29 @@ const (
 	typeErr
 )
 
+func MustCompile(b []byte) *Schema {
+	s := new(Schema)
+	s.MustCompile(b)
+	return s
+}
+
 // Compile parses a schema document into a program.
 func Compile(b []byte) (*Schema, error) {
-	var s Schema
+	s := new(Schema)
 
 	err := s.Compile(b)
 	if err != nil {
 		return nil, err
 	}
 
-	return &s, nil
+	return s, nil
+}
+
+func (s *Schema) MustCompile(schema []byte) {
+	err := s.Compile(schema)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (s *Schema) Compile(schema []byte) error {
@@ -599,10 +612,10 @@ func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if !v {
-		return Pass, i, nil
+		return makeImm(Unique, 0), i, nil
 	}
 
-	return Unique, i, nil
+	return makeImm(Unique, 1), i, nil
 }
 
 func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
