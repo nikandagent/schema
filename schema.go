@@ -167,7 +167,7 @@ const (
 )
 
 func makeNode(op Opcode, off, n int) Opcode {
-	if off < 0 || off > maxOff {
+	if off < 0 || int64(off) > maxOff {
 		panic(off)
 	}
 	if n < 0 || n > maxArg {
@@ -186,7 +186,7 @@ func MakeInt(v int64) Opcode {
 }
 
 func makeImm(op Opcode, v int) Opcode {
-	if v < minImm || v > maxImm {
+	if int64(v) < minImm || int64(v) > maxImm {
 		panic(v)
 	}
 
