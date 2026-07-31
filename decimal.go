@@ -12,7 +12,18 @@ import (
 func isMultiple(value, divisor []byte) (ok, exact bool) {
 	mv, sv, ok1 := parseDecimal(value)
 	md, sd, ok2 := parseDecimal(divisor)
-	if !ok1 || !ok2 || md == 0 {
+	if !ok1 || !ok2 {
+		return false, false
+	}
+
+	return isMultipleDec(mv, sv, md, sd)
+}
+
+// isMultipleDec is isMultiple over already-parsed decimals: each is mant*10^scale
+// with the sign dropped, which divisibility does not depend on. A synthesized
+// integer enters here directly as (mant, 0), no text in between.
+func isMultipleDec(mv uint64, sv int, md uint64, sd int) (ok, exact bool) {
+	if md == 0 {
 		return false, false
 	}
 

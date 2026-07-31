@@ -198,23 +198,23 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 			a.Fail(TooLong, op, val)
 		}
 	case Minimum:
-		if val.Op() == Number && a.number(val) < a.schemaNum(op) {
+		if isNumber(val) && a.number(val) < a.schemaNum(op) {
 			a.Fail(BelowMinimum, op, val)
 		}
 	case Maximum:
-		if val.Op() == Number && a.number(val) > a.schemaNum(op) {
+		if isNumber(val) && a.number(val) > a.schemaNum(op) {
 			a.Fail(AboveMaximum, op, val)
 		}
 	case ExclMin:
-		if val.Op() == Number && a.number(val) <= a.schemaNum(op) {
+		if isNumber(val) && a.number(val) <= a.schemaNum(op) {
 			a.Fail(BelowMinimumExcl, op, val)
 		}
 	case ExclMax:
-		if val.Op() == Number && a.number(val) >= a.schemaNum(op) {
+		if isNumber(val) && a.number(val) >= a.schemaNum(op) {
 			a.Fail(AboveMaximumExcl, op, val)
 		}
 	case MultipleOf:
-		if val.Op() == Number && !a.multipleOf(op, val) {
+		if isNumber(val) && !a.multipleOf(op, val) {
 			a.Fail(NotMultipleOf, op, val)
 		}
 	case Enum:
@@ -915,8 +915,23 @@ func (a *Applier) schemaNum(op Opcode) float64 {
 
 func (a *Applier) multipleOf(op, val Opcode) bool {
 	lit := a.s.prog.code[op.Off()]
+	div := a.s.prog.Reader().Span(lit)
 
-	ok, exact := isMultiple(a.b.Reader().Span(val), a.s.prog.Reader().Span(lit))
+	var ok, exact bool
+
+	switch val.Op() {
+	case Number:
+		ok, exact = isMultiple(a.b.Reader().Span(val), div)
+	case IntLit:
+		if md, sd, good := parseDecimal(div); good {
+			ok, exact = isMultipleDec(magnitude(val.Imm()), 0, md, sd)
+		}
+
+		// FltLit spends its low mantissa bits on the opcode, so it is not the number
+		// the caller wrote and has no exact decimal to test — leave it to the float
+		// fallback. Synthesize a Number span instead when exactness matters.
+	}
+
 	if exact {
 		return ok
 	}
@@ -974,6 +989,16 @@ func (a *Applier) reset(s *Schema, rewrite bool) *Applier {
 	a.at = a.at[:0]
 
 	return a
+}
+
+// magnitude is |v| as unsigned, exact for math.MinInt64 too.
+func magnitude(v int64) uint64 {
+	u := uint64(v)
+	if v < 0 {
+		u = -u
+	}
+
+	return u
 }
 
 func isNumber(op Opcode) bool {
