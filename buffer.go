@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"iter"
 	"math"
 	"strconv"
@@ -579,6 +580,41 @@ func (b BufferReader) String(op Opcode) []byte {
 	}
 
 	return b.text[mark:]
+}
+
+// jsonEsc is the escape set defaultString enables for a double-quoted string, so
+// equalString decodes exactly what String does.
+const jsonEsc = skip.Dqt | skip.EscControl | skip.EscXX | skip.EscU4 | skip.EscU8
+
+// equalString compares two JSON string tokens by the string they denote. One
+// string has many spellings — "a" and "\u0061" — so equal bytes prove equality
+// but unequal bytes prove nothing. Escaped tokens are then walked a rune at a
+// time; neither side is ever decoded into a buffer.
+func equalString(l, r []byte) bool {
+	if bytes.Equal(l, r) {
+		return true
+	}
+
+	// With no escape on either side the bytes were the whole answer.
+	if bytes.IndexByte(l, '\\') < 0 && bytes.IndexByte(r, '\\') < 0 {
+		return false
+	}
+
+	i, j := 1, 1 // past the opening quote
+	le, re := len(l)-1, len(r)-1
+
+	for i < le && j < re {
+		ls, lr, ni := skip.DecodeRune(l, i, jsonEsc, 0)
+		rs, rr, nj := skip.DecodeRune(r, j, jsonEsc, 0)
+
+		if ls.Err() || rs.Err() || lr != rr {
+			return false
+		}
+
+		i, j = ni, nj
+	}
+
+	return i == le && j == re
 }
 
 func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {

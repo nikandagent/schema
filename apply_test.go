@@ -128,6 +128,28 @@ func TestValidate(tb *testing.T) {
 
 		{`{"title":"x","type":"string"}`, `"y"`, true}, // annotation ignored
 
+		// One string, many spellings: equality is on the value, not the encoding.
+		{`{"const":"a"}`, `"\u0061"`, true},
+		{`{"const":"\u0061"}`, `"a"`, true},
+		{`{"const":"a"}`, `"b"`, false},
+		{`{"const":"\u0061"}`, `"b"`, false},
+		{`{"enum":["a","b"]}`, `"\u0062"`, true},
+		{`{"enum":["a"]}`, `"\u0062"`, false},
+		{`{"const":"\n"}`, "\"\\u000a\"", true},
+		{`{"const":"\ud83d\ude00"}`, `"\uD83D\uDE00"`, true},
+		{`{"const":"a"}`, `"ab"`, false},
+		{`{"const":"\u0061"}`, `"ab"`, false},
+		{`{"const":"ab"}`, `"\u0061"`, false},
+		{`{"required":["a"]}`, `{"\u0061":1}`, true},
+		{`{"required":["\u0061"]}`, `{"a":1}`, true},
+		{`{"required":["a"]}`, `{"b":1}`, false},
+		{`{"properties":{"a":{"type":"integer"}}}`, `{"\u0061":"x"}`, false},
+		{`{"properties":{"\u0061":{"type":"integer"}}}`, `{"a":"x"}`, false},
+		{`{"properties":{"a":{"type":"integer"}}}`, `{"\u0061":1}`, true},
+		{`{"uniqueItems":true}`, `["a","\u0061"]`, false},
+		{`{"uniqueItems":true}`, `["a","\u0062"]`, true},
+		{`{"additionalProperties":false,"properties":{"a":{}}}`, `{"\u0061":1}`, true},
+
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":5}`, true},
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":-1}`, false},
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":"x"}`, false},

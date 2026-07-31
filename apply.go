@@ -878,7 +878,7 @@ func (a *Applier) member(obj, key Opcode) (k, v Opcode, ok bool) {
 }
 
 func (a *Applier) keyEq(data, schema Opcode) bool {
-	return bytes.Equal(a.b.Reader().Span(data), a.s.prog.Reader().Span(schema))
+	return equalString(a.b.Reader().Span(data), a.s.prog.Reader().Span(schema))
 }
 
 func (a *Applier) idEq(id, schema Opcode) bool {
@@ -1047,7 +1047,7 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	case Null, True, False:
 		return true
 	case String:
-		return bytes.Equal(lb.Span(l), rb.Span(r))
+		return equalString(lb.Span(l), rb.Span(r))
 	case Array:
 		lo, ln := l.Off(), l.Arg()
 		ro, rn := r.Off(), r.Arg()
