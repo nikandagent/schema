@@ -18,6 +18,12 @@ func TestFormat(tb *testing.T) {
 		{in: `{"uniqueItems":false}`}, // inert, but preserved: compile never discards
 		{in: `{"minProperties":1,"maxProperties":3}`},
 		{in: `{"properties":{"a":{"type":"integer"}},"required":["a"]}`},
+		// required is reordered to follow properties, and an escaped name is the
+		// same name — it sorts into its property's slot, not past the end.
+		{
+			in:  `{"properties":{"a":{},"b":{}},"required":["b","\u0061"]}`,
+			out: `{"properties":{"a":{},"b":{}},"required":["\u0061","b"]}`,
+		},
 		{in: `{"enum":[1,"x",null,true]}`},
 		{in: `{"const":{"a":[1,2]}}`},
 		{in: `{"items":{"type":"number"}}`},

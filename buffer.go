@@ -5,6 +5,7 @@ import (
 	"iter"
 	"math"
 	"strconv"
+	"unicode/utf8"
 
 	"nikand.dev/go/json2"
 	"nikand.dev/go/skip"
@@ -615,6 +616,23 @@ func equalString(l, r []byte) bool {
 	}
 
 	return i == le && j == re
+}
+
+// decodeBody appends to w the string that an unquoted JSON string body denotes.
+// Nodes that hold their content without the quotes — Ref — have no token for the
+// usual decoders to chew on, so they come through here.
+func decodeBody(w, s []byte) ([]byte, bool) {
+	for i := 0; i < len(s); {
+		st, r, j := skip.DecodeRune(s, i, jsonEsc, 0)
+		if st.Err() {
+			return w, false
+		}
+
+		w = utf8.AppendRune(w, r)
+		i = j
+	}
+
+	return w, true
 }
 
 func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {

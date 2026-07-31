@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"regexp"
@@ -664,6 +665,26 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	return makeNode(Ref, off, n), j, nil
 }
 
+// refString is the pointer a Ref denotes. The node holds the token content with
+// the quotes stripped but the escapes intact, while $defs names and $anchor
+// fragments are stored decoded — so a ref spelled "#/$defs/a" has to be
+// decoded here to match the def named "#/$defs/a".
+func (s *Schema) refString(op Opcode) string {
+	sp := s.prog.Reader().Span(op)
+	if bytes.IndexByte(sp, '\\') < 0 {
+		return string(sp)
+	}
+
+	var buf [64]byte
+
+	d, ok := decodeBody(buf[:0], sp)
+	if !ok {
+		return string(sp) // malformed: no target will match, so it fails as unresolved
+	}
+
+	return string(d)
+}
+
 // pointerEscape encodes a definition name into a JSON Pointer reference token:
 // '~'->"~0", '/'->"~1" (order matters), so "a/b" stored as "a~1b" is comparable
 // to a $ref pointer and never ambiguous with a navigation step.
@@ -775,8 +796,7 @@ func (s *Schema) checkRefs() error {
 			continue
 		}
 
-		ref := string(s.prog.Reader().Span(op))
-		doc, frag := splitRef(ref)
+		doc, frag := splitRef(s.refString(op))
 
 		if doc == "" {
 			if s.fragTarget(frag) == None {
@@ -837,8 +857,7 @@ func (s *Schema) checkPatterns() error {
 // internal "#frag", another document for "doc#frag". The doc part is an opaque
 // handle matched against the registry, then loaded via Resolve on a miss.
 func (s *Schema) refResolve(op Opcode) (*Schema, Opcode, error) {
-	ref := string(s.prog.Reader().Span(op))
-	doc, frag := splitRef(ref)
+	doc, frag := splitRef(s.refString(op))
 
 	t := s
 
@@ -1157,7 +1176,7 @@ func (s *Schema) propIndex(props, name Opcode) int {
 	off, n := props.OffInt(), props.ArgInt()
 
 	for i := range n {
-		if string(s.prog.Reader().Span(s.prog.code[off+2*i])) == string(s.prog.Reader().Span(name)) {
+		if equalString(s.prog.Reader().Span(s.prog.code[off+2*i]), s.prog.Reader().Span(name)) {
 			return i
 		}
 	}

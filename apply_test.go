@@ -150,6 +150,14 @@ func TestValidate(tb *testing.T) {
 		{`{"uniqueItems":true}`, `["a","\u0062"]`, true},
 		{`{"additionalProperties":false,"properties":{"a":{}}}`, `{"\u0061":1}`, true},
 
+		// $defs names and $anchor fragments are stored decoded, so an escaped $ref
+		// must match them by value too.
+		{`{"$defs":{"a":{"type":"integer"}},"$ref":"#/$defs/\u0061"}`, `1`, true},
+		{`{"$defs":{"a":{"type":"integer"}},"$ref":"#/$defs/\u0061"}`, `"x"`, false},
+		{`{"$defs":{"\u0061":{"type":"integer"}},"$ref":"#/$defs/a"}`, `"x"`, false},
+		{`{"$defs":{"a":{"type":"integer"}},"$anchor":"\u0061"}`, `1`, true},
+		{`{"$defs":{"x":{"$anchor":"a","type":"integer"}},"$ref":"#\u0061"}`, `"x"`, false},
+
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":5}`, true},
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":-1}`, false},
 		{`{"$defs":{"pos":{"type":"integer","minimum":0}},"properties":{"n":{"$ref":"#/$defs/pos"}}}`, `{"n":"x"}`, false},
