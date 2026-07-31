@@ -903,7 +903,7 @@ func (a *Applier) equalLit(val, lit Opcode) bool {
 }
 
 func (a *Applier) number(val Opcode) float64 {
-	v, _ := json2.Value(a.b.Reader().Span(val)).Float64()
+	v, _ := a.b.Reader().Float(val)
 	return v
 }
 
@@ -933,12 +933,12 @@ func (a *Applier) integral(val Opcode) bool {
 func (a *Applier) strlen(val Opcode) int64 {
 	var d json2.Iterator
 
-	_, rs, _, _ := d.DecodedStringLength(a.b.src, val.OffInt())
+	_, rs, _, _ := d.DecodedStringLength(a.b.Reader().Span(val), 0)
 	return int64(rs)
 }
 
 func (a *Applier) Fail(code DiagCode, op, val Opcode) {
-	off, end := a.b.Reader().span(val)
+	off, end, _ := a.b.Reader().Source(val)
 	a.diag = append(a.diag, Diag{Code: code, Op: op.Op(), Off: off, End: end})
 }
 
@@ -976,13 +976,22 @@ func (a *Applier) reset(s *Schema, rewrite bool) *Applier {
 	return a
 }
 
+func isNumber(op Opcode) bool {
+	switch op.Op() {
+	case Number, IntLit, FltLit:
+		return true
+	default:
+		return false
+	}
+}
+
 func dataType(val Opcode) int {
 	switch val.Op() {
 	case Null:
 		return typeNull
 	case True, False:
 		return typeBool
-	case Number:
+	case Number, IntLit, FltLit:
 		return typeNum
 	case String:
 		return typeStr
@@ -996,6 +1005,15 @@ func dataType(val Opcode) int {
 }
 
 func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
+	// Numbers compare by value across shapes: the same number reaches here as a
+	// Number span from the input or as an IntLit/FltLit word from a handler.
+	if isNumber(l) && isNumber(r) {
+		lv, _ := lb.Float(l)
+		rv, _ := rb.Float(r)
+
+		return lv == rv
+	}
+
 	if l.Op() != r.Op() {
 		return false
 	}
@@ -1003,11 +1021,6 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	switch l.Op() {
 	case Null, True, False:
 		return true
-	case Number:
-		lv, _ := json2.Value(lb.Span(l)).Float64()
-		rv, _ := json2.Value(rb.Span(r)).Float64()
-
-		return lv == rv
 	case String:
 		return bytes.Equal(lb.Span(l), rb.Span(r))
 	case Array:

@@ -944,3 +944,65 @@ func TestWalkFilterDiags(tb *testing.T) {
 		tb.Errorf("code=%v", d[0].Code)
 	}
 }
+
+// TestSynthesized walks schemas against values a handler produced instead of
+// decoded ones. Such values carry no source span, so the keyword checks must
+// treat them as first-class rather than panic reaching for their bytes.
+func TestSynthesized(tb *testing.T) {
+	obj := func(w BufferWriter) Opcode { return w.Object(w.String("k"), w.String("v")) }
+
+	for _, tc := range []struct {
+		schema string
+		make   func(BufferWriter) Opcode
+		ok     bool
+	}{
+		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Int(5) }, true},
+		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Float(2) }, true},
+		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Float(1.5) }, false},
+		{`{"type":"number"}`, func(w BufferWriter) Opcode { return w.Float(1.5) }, true},
+		{`{"type":"string"}`, func(w BufferWriter) Opcode { return w.Int(5) }, false},
+		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.String("x") }, false},
+		{`{"minLength":2}`, func(w BufferWriter) Opcode { return w.String("xy") }, true},
+		{`{"minLength":2}`, func(w BufferWriter) Opcode { return w.String("x") }, false},
+		{`{"pattern":"^a+$"}`, func(w BufferWriter) Opcode { return w.String("aaa") }, true},
+		{`{"pattern":"^a+$"}`, func(w BufferWriter) Opcode { return w.String("b") }, false},
+		{`{"type":"object"}`, obj, true},
+		{`{"type":"string"}`, obj, false},
+		{`{"const":5}`, func(w BufferWriter) Opcode { return w.Int(5) }, true},
+		{`{"const":5}`, func(w BufferWriter) Opcode { return w.Int(6) }, false},
+		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Opcode { return w.Float(2.5) }, true},
+		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Opcode { return w.Int(3) }, false},
+		{`{"const":{"k":"v"}}`, obj, true},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %s: %v", tc.schema, err)
+			continue
+		}
+
+		first := true
+		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+			if first {
+				first, val = false, tc.make(c.Buffer().Writer())
+			}
+
+			return c.Apply(op, val, h)
+		}
+
+		d, err := s.Walk([]byte(`null`), h)
+		if err != nil {
+			tb.Errorf("walk %s: %v", tc.schema, err)
+			continue
+		}
+
+		if (len(d) == 0) != tc.ok {
+			tb.Errorf("walk synthesized against %s: ok=%v diag=%v", tc.schema, tc.ok, d)
+		}
+
+		// A synthesized value has no source, so the diagnostic points nowhere
+		// rather than at a bogus offset.
+		if len(d) != 0 && (d[0].Off != 0 || d[0].End != 0) {
+			tb.Errorf("walk synthesized against %s: span=%d:%d, want 0:0", tc.schema, d[0].Off, d[0].End)
+		}
+	}
+}

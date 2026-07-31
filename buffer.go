@@ -271,8 +271,8 @@ func (b BufferWriter) Object(kv ...Opcode) Opcode { return b.Nodes(Object, kv, -
 
 func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 	switch op.Op() {
-	case Null, True, False:
-		return op
+	case Null, True, False, IntLit, FltLit:
+		return op // self-contained words: the value rides the opcode, no bytes to copy
 	case Number, String:
 		return b.Span(op, src.Span(op))
 	case Array, Object:
@@ -342,6 +342,13 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 	}
 }
 
+// Span is the node's JSON token bytes, decoded from the input or written into
+// the text tail — the two are one address space here, so the caller need not
+// care which. The result is empty for a node whose kind carries a token but this
+// one has none: a synthesized container, or a bare null/true/false word. It
+// panics on a kind that never carries one (IntLit, FltLit, None) — that is a
+// property of the opcode, not of the value, so it cannot depend on where the
+// node came from. Ask Source when the origin is what you need.
 func (b BufferReader) Span(op Opcode) []byte {
 	off, end := b.span(op)
 
@@ -365,15 +372,51 @@ func (b BufferReader) span(op Opcode) (off, end int) {
 		panic(op.Op())
 	}
 
+	off, end, _ = b.contSpan(op)
+	return off, end
+}
+
+// Source locates op in the input bytes. Values decoded from src carry their
+// source span; values synthesized through BufferWriter do not — ok is false and
+// off/end are zero, which is the normal case for a node a Walk handler produced.
+// Use it for diagnostics; Span reads the bytes and has no answer for a node that
+// never was text. Panics on a word that is not a value node.
+//
+// A zero-width span is a position, not an absence — it names the place where
+// something should have been. So a bare Null/True/False word, which carries no
+// span, reads as position 0 in src and cannot be told apart from a decoded one.
+func (b BufferReader) Source(op Opcode) (off, end int, ok bool) {
+	switch op.Op() {
+	case Number, String, Null, False, True, Pattern, Ref, Key:
+		off, end = op.SpanInt()
+
+		// Synthesized scalars live in the text tail, past the input.
+		if end <= len(b.src) {
+			return off, end, true
+		}
+
+		return 0, 0, false
+	case IntLit, FltLit, None:
+		return 0, 0, false
+	case Object, Array:
+		return b.contSpan(op)
+	default:
+		panic(op.Op())
+	}
+}
+
+// contSpan reads the source span parked just before a container's children.
+func (b BufferReader) contSpan(op Opcode) (off, end int, ok bool) {
 	idx := op.OffInt()
 	if idx-1 >= 0 && b.code[idx-1].Op() == SrcSpan {
-		return b.code[idx-1].SpanInt()
+		off, end = b.code[idx-1].SpanInt()
+		return off, end, true
 	}
 	if idx-2 >= 0 && b.code[idx-2].Op() == SrcOff && b.code[idx-1].Op() == SrcOff {
-		return b.code[idx-2].ImmInt(), b.code[idx-1].ImmInt()
+		return b.code[idx-2].ImmInt(), b.code[idx-1].ImmInt(), true
 	}
 
-	return 0, 0
+	return 0, 0, false
 }
 
 // Nodes unwraps a container node into its child words. Result slice is owned by
