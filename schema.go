@@ -36,6 +36,11 @@ type (
 	// canonicalizes both schema and data and fills defaults; the Keep* bits opt
 	// out of a step, RejectUnknown opts in.
 	Flags uint32
+
+	// Types is a set of JSON types: the types a Type keyword admits, or the
+	// single type a value has. The empty set is a schema node with no type
+	// keyword, so an absent keyword needs no special case.
+	Types uint8
 )
 
 const (
@@ -165,6 +170,69 @@ const (
 	Then
 	Else
 )
+
+const (
+	TypeNull Types = 1 << iota
+	TypeBoolean
+	TypeInteger
+	TypeNumber
+	TypeString
+	TypeArray
+	TypeObject
+
+	typeErr // an unknown type name; rejected at compile, never in a program
+)
+
+var typeNames = []struct {
+	bit  Types
+	name string
+}{
+	{TypeNull, "null"},
+	{TypeBoolean, "boolean"},
+	{TypeInteger, "integer"},
+	{TypeNumber, "number"},
+	{TypeString, "string"},
+	{TypeArray, "array"},
+	{TypeObject, "object"},
+}
+
+// TypesOf is the set a Type keyword admits, or the empty set for None — so the
+// absent keyword Keyword returns needs no check. Any other node panics.
+func TypesOf(op Opcode) Types {
+	switch op.Op() {
+	case Type:
+		return Types(op.Imm())
+	case None:
+		return 0
+	default:
+		panic(op.Op())
+	}
+}
+
+func (t Types) Is(g Types) bool  { return t&g == g }
+func (t Types) Any(g Types) bool { return t&g != 0 }
+
+func (t Types) String() string {
+	var b []byte
+
+	for _, n := range typeNames {
+		if !t.Any(n.bit) {
+			continue
+		}
+
+		if b != nil {
+			b = append(b, '|')
+		}
+
+		b = append(b, n.name...)
+	}
+
+	if b == nil {
+		return "empty"
+	}
+
+	return string(b)
+}
 
 func makeNode(op Opcode, off, n int) Opcode {
 	if off < 0 || int64(off) > maxOff {

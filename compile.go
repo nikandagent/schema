@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"regexp"
@@ -15,18 +14,6 @@ type (
 		name string // full pointer, e.g. "#/$defs/Name"
 		root Opcode
 	}
-)
-
-const (
-	typeNull = 1 << iota
-	typeBool
-	typeInt
-	typeNum
-	typeStr
-	typeArr
-	typeObj
-
-	typeErr
 )
 
 func MustCompile(b []byte) *Schema {
@@ -318,7 +305,7 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 		return 0, i, err
 	}
 
-	var mask int
+	var mask Types
 	var name []byte
 
 	switch tp {
@@ -354,7 +341,7 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 		return 0, i, serr(UnknownType, Type, st, i-st, ErrKeyword)
 	}
 
-	return makeImm(Type, mask), i, nil
+	return makeImm(Type, int(mask)), i, nil
 }
 
 // enterKind opens a container-keyword value, returning a curated ErrKeyword when
@@ -670,19 +657,7 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 // fragments are stored decoded — so a ref spelled "#/$defs/a" has to be
 // decoded here to match the def named "#/$defs/a".
 func (s *Schema) refString(op Opcode) string {
-	sp := s.prog.Reader().Span(op)
-	if bytes.IndexByte(sp, '\\') < 0 {
-		return string(sp)
-	}
-
-	var buf [64]byte
-
-	d, ok := decodeBody(buf[:0], sp)
-	if !ok {
-		return string(sp) // malformed: no target will match, so it fails as unresolved
-	}
-
-	return string(d)
+	return string(s.prog.Reader().String(op))
 }
 
 // pointerEscape encodes a definition name into a JSON Pointer reference token:
@@ -853,10 +828,15 @@ func (s *Schema) checkPatterns() error {
 	return nil
 }
 
-// refResolve resolves a $ref to its document and node: the same schema for an
-// internal "#frag", another document for "doc#frag". The doc part is an opaque
-// handle matched against the registry, then loaded via Resolve on a miss.
-func (s *Schema) refResolve(op Opcode) (*Schema, Opcode, error) {
+// RefTarget resolves a $ref node to its document and node: the same schema for
+// an internal "#frag", another document for "doc#frag". The doc part is an
+// opaque handle matched against the registry, then loaded via Resolve on a miss.
+// The returned document owns the node, so read it with that schema's Reader.
+func (s *Schema) RefTarget(op Opcode) (*Schema, Opcode, error) {
+	if op.Op() != Ref {
+		panic(op.Op())
+	}
+
 	doc, frag := splitRef(s.refString(op))
 
 	t := s
@@ -935,22 +915,22 @@ func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {
 	return s.prog.value(b, st, false)
 }
 
-func typeBit(name []byte) int {
+func typeBit(name []byte) Types {
 	switch string(name) {
 	case "null":
-		return typeNull
+		return TypeNull
 	case "boolean":
-		return typeBool
+		return TypeBoolean
 	case "integer":
-		return typeInt
+		return TypeInteger
 	case "number":
-		return typeNum
+		return TypeNumber
 	case "string":
-		return typeStr
+		return TypeString
 	case "array":
-		return typeArr
+		return TypeArray
 	case "object":
-		return typeObj
+		return TypeObject
 	default:
 		return typeErr
 	}

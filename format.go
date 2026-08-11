@@ -5,19 +5,6 @@ import (
 	"strconv"
 )
 
-var typeNames = []struct {
-	bit  int
-	name string
-}{
-	{typeNull, "null"},
-	{typeBool, "boolean"},
-	{typeInt, "integer"},
-	{typeNum, "number"},
-	{typeStr, "string"},
-	{typeArr, "array"},
-	{typeObj, "object"},
-}
-
 // Format reconstructs the schema document from the program in canonical form.
 // $defs round-trips from its Defs node in the tree; the s.defs table is only a
 // $ref resolution index and is never emitted from here.
@@ -85,14 +72,14 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 
 		return append(w, '}')
 	default:
-		panic(op)
+		panic(op.Op())
 	}
 }
 
 func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	switch op.Op() {
 	case Type:
-		return s.formatType(w, op.ImmInt())
+		return s.formatType(w, TypesOf(op))
 	case Properties, Defs:
 		off, n := op.Off(), op.Arg()
 
@@ -178,7 +165,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		w = appendRef(w, s.prog.Reader().Span(op))
 		return append(w, '"')
 	default:
-		panic(op)
+		panic(op.Op())
 	}
 }
 
@@ -187,7 +174,7 @@ func (s *Schema) lit(w []byte, val Opcode) []byte {
 	return s.prog.Reader().AppendJSON(w, val)
 }
 
-func (s *Schema) formatType(w []byte, mask int) []byte {
+func (s *Schema) formatType(w []byte, mask Types) []byte {
 	one := mask != 0 && mask&(mask-1) == 0
 	if !one {
 		w = append(w, '[')
@@ -285,6 +272,6 @@ func keywordName(op Opcode) string {
 	case Ref:
 		return "$ref"
 	default:
-		panic(op)
+		panic(op.Op())
 	}
 }

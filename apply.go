@@ -255,7 +255,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	case Ref:
 		// An external ref lives in another document's program arena; swap it in for
 		// the subtree (the data arena c.b stays put), then restore.
-		ts, tnode, err := a.s.refResolve(op)
+		ts, tnode, err := a.s.RefTarget(op)
 		if err != nil {
 			return val, err
 		}
@@ -281,7 +281,7 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		// Default is consumed by the enclosing Properties (insertion); Defs only
 		// holds definitions reached via $ref. None constrains a value here.
 	default:
-		panic(op)
+		panic(op.Op())
 	}
 
 	return val, nil
@@ -302,11 +302,11 @@ func (a *Applier) applyChild(sub, val, step Opcode, h Handler) (Opcode, error) {
 }
 
 func (a *Applier) checkType(op, val Opcode) {
-	mask := op.ImmInt()
+	mask := TypesOf(op)
 	t := dataType(val)
 
-	ok := mask&t != 0
-	if t == typeNum && mask&typeInt != 0 && a.integral(val) {
+	ok := mask.Any(t)
+	if t == TypeNumber && mask.Any(TypeInteger) && a.integral(val) {
 		ok = true
 	}
 
@@ -325,7 +325,7 @@ func (a *Applier) checkProps(op, val Opcode, h Handler) (Opcode, error) {
 		a.Fail(InvalidObjectKey, op, None)
 		return val, nil
 	default:
-		panic(seek)
+		panic(seek.Op())
 	}
 
 	if val.Op() != Object {
@@ -721,7 +721,7 @@ func (a *Applier) eachItem(op, val, prefix, sub Opcode, first, last int, h Handl
 		a.Fail(InvalidArrayIndex, op, None)
 		return val, nil
 	default:
-		panic(seek)
+		panic(seek.Op())
 	}
 
 	mark := len(a.b.tmp)
@@ -1010,20 +1010,20 @@ func isNumber(op Opcode) bool {
 	}
 }
 
-func dataType(val Opcode) int {
+func dataType(val Opcode) Types {
 	switch val.Op() {
 	case Null:
-		return typeNull
+		return TypeNull
 	case True, False:
-		return typeBool
+		return TypeBoolean
 	case Number, IntLit, FltLit:
-		return typeNum
+		return TypeNumber
 	case String:
-		return typeStr
+		return TypeString
 	case Array:
-		return typeArr
+		return TypeArray
 	case Object:
-		return typeObj
+		return TypeObject
 	default:
 		return 0
 	}

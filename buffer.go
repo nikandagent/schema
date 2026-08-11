@@ -291,7 +291,7 @@ func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 
 		return b.Array(b.tmp[mark:]...)
 	default:
-		panic(op)
+		panic(op.Op())
 	}
 }
 
@@ -340,7 +340,7 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 
 		return append(w, '}')
 	default:
-		panic(val)
+		panic(val.Op())
 	}
 }
 
@@ -556,16 +556,23 @@ func (b BufferReader) Deref(op Opcode) Opcode {
 
 // String returns decoded string as bytes.
 // Result lifetime is until any other method of that buffer is called.
+//
+// Pattern is a quoted token like String. Ref is the odd one: it holds the body
+// alone, escapes intact, so it decodes by the same rules without the quotes.
 func (b BufferReader) String(op Opcode) []byte {
-	if op.Op() != String {
-		panic(op)
+	switch op.Op() {
+	case String, Pattern:
+	case Ref:
+		return b.body(op)
+	default:
+		panic(op.Op())
 	}
 
 	sp := b.Span(op)
 
 	s, _, _, _ := skip.String(sp, 0, skip.Dqt)
 	if s.Err() {
-		return nil
+		panic(string(sp))
 	}
 
 	if !s.Is(skip.Escapes) {
@@ -577,10 +584,29 @@ func (b BufferReader) String(op Opcode) []byte {
 
 	s, b.text, _, _ = skip.DecodeString(sp, 0, skip.Dqt|skip.StrEscapes, b.text)
 	if s.Err() {
-		return nil
+		panic(string(sp))
 	}
 
 	return b.text[mark:]
+}
+
+func (b BufferReader) body(op Opcode) []byte {
+	sp := b.Span(op)
+	if bytes.IndexByte(sp, '\\') < 0 {
+		return sp
+	}
+
+	mark := len(b.text)
+	defer func() { b.text = b.text[:mark] }()
+
+	w, ok := decodeBody(b.text, sp)
+	if !ok {
+		panic(string(sp))
+	}
+
+	b.text = w
+
+	return w[mark:]
 }
 
 // jsonEsc is the escape set defaultString enables for a double-quoted string, so
@@ -637,7 +663,7 @@ func decodeBody(w, s []byte) ([]byte, bool) {
 
 func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
 	if op.Op() != String {
-		panic(op)
+		panic(op.Op())
 	}
 
 	var d json2.Iterator

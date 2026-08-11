@@ -238,6 +238,65 @@ func TestBufferIter(tb *testing.T) {
 	}
 }
 
+func TestBufferString(tb *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		kw   Opcode
+		want string
+	}{
+		{`{"pattern":"^a"}`, Pattern, `^a`},
+		{`{"pattern":"\\d+"}`, Pattern, `\d+`},
+		{`{"pattern":"\u0061+"}`, Pattern, `a+`},
+
+		{`{"$defs":{"T":{}},"$ref":"#/$defs/T"}`, Ref, `#/$defs/T`},
+		{`{"$defs":{"a":{}},"$ref":"#/$defs/\u0061"}`, Ref, `#/$defs/a`},
+		{`{"$defs":{"a\\b":{}},"$ref":"#/$defs/a\\b"}`, Ref, `#/$defs/a\b`},
+	} {
+		s, err := Compile([]byte(tc.in))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.in, err)
+			continue
+		}
+
+		b := s.Reader()
+
+		op := b.Keyword(s.Root(), tc.kw)
+		if op == None {
+			tb.Errorf("string %q: no %v keyword", tc.in, tc.kw)
+			continue
+		}
+
+		if got := string(b.String(op)); got != tc.want {
+			tb.Errorf("string %q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	var buf Buffer
+
+	buf.Reset()
+
+	r, w := buf.Reader(), buf.Writer()
+
+	if got := string(r.String(w.String(`a"b`))); got != `a"b` {
+		tb.Errorf("string String: got %q, want %q", got, `a"b`)
+	}
+
+	// a Key is the bytes At was given, verbatim
+	for _, in := range []string{`key`, `a\u0062`, `a\z`} {
+		if got := string(r.Span(w.Span(Key, []byte(in)))); got != in {
+			tb.Errorf("span Key %q: got %q", in, got)
+		}
+	}
+
+	mustPanic(tb, "String(Key)", func() { r.String(w.Span(Key, []byte(`key`))) })
+	mustPanic(tb, "String(IntLit)", func() { r.String(w.Int(5)) })
+	mustPanic(tb, "String(Null)", func() { r.String(w.Null()) })
+
+	// a corrupt program, not bad input
+	mustPanic(tb, "String(unquoted)", func() { r.String(w.Span(String, []byte(`abc`))) })
+	mustPanic(tb, "String(bad escape)", func() { r.String(w.Span(String, []byte(`"a\z"`))) })
+}
+
 func TestBufferDeref(tb *testing.T) {
 	for _, tc := range []struct {
 		schema string

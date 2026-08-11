@@ -186,6 +186,143 @@ func TestMutualResolve(tb *testing.T) {
 	}
 }
 
+func refNode(tb *testing.T, s *Schema, prop string) Opcode {
+	tb.Helper()
+
+	b := s.Reader()
+	op := s.Root()
+
+	if prop != "" {
+		op = None
+
+		for k, v := range b.Iter(b.Keyword(s.Root(), Properties)) {
+			if string(b.String(k)) == prop {
+				op = v
+				break
+			}
+		}
+
+		if op == None {
+			tb.Fatalf("no property %q", prop)
+		}
+	}
+
+	ref := b.Keyword(op, Ref)
+	if ref == None {
+		tb.Fatalf("no $ref in %q", prop)
+	}
+
+	return ref
+}
+
+func TestRefTarget(tb *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		prop string // property holding the $ref; empty for a root-level one
+		want Types
+	}{
+		{`{"$defs":{"T":{"type":"string"}},"$ref":"#/$defs/T"}`, "", TypeString},
+		{`{"$defs":{"a/b":{"type":"integer"}},"$ref":"#/$defs/a~1b"}`, "", TypeInteger},
+		{`{"$defs":{"T":{"type":"number"}},"properties":{"a":{"$ref":"#/$defs/T"}}}`, "a", TypeNumber},
+		{`{"properties":{"a":{"$anchor":"Foo","type":"integer"},"b":{"$ref":"#Foo"}}}`, "b", TypeInteger},
+	} {
+		s, err := Compile([]byte(tc.in))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.in, err)
+			continue
+		}
+
+		t, node, err := s.RefTarget(refNode(tb, s, tc.prop))
+		if err != nil {
+			tb.Errorf("reftarget %q: %v", tc.in, err)
+			continue
+		}
+
+		if t != s {
+			tb.Errorf("reftarget %q: got another document, want the same", tc.in)
+			continue
+		}
+
+		if got := TypesOf(t.Reader().Keyword(node, Type)); got != tc.want {
+			tb.Errorf("reftarget %q: target type %v, want %v", tc.in, got, tc.want)
+		}
+	}
+
+	// "#" is the document root itself.
+	{
+		s, err := Compile([]byte(`{"properties":{"a":{"$ref":"#"}}}`))
+		if err != nil {
+			tb.Fatalf("compile root ref: %v", err)
+		}
+
+		t, node, err := s.RefTarget(refNode(tb, s, "a"))
+		if err != nil {
+			tb.Fatalf("reftarget root ref: %v", err)
+		}
+
+		if t != s || node != s.Root() {
+			tb.Errorf("reftarget root ref: got %v, want root %v", node, s.Root())
+		}
+	}
+
+	// Not a Ref: a program bug, like every other node reader.
+	{
+		s, err := Compile([]byte(`{"type":"string"}`))
+		if err != nil {
+			tb.Fatalf("compile: %v", err)
+		}
+
+		mustPanic(tb, "RefTarget(All)", func() { s.RefTarget(s.Root()) })
+		mustPanic(tb, "RefTarget(Type)", func() { s.RefTarget(s.Reader().Keyword(s.Root(), Type)) })
+	}
+}
+
+func TestRefTargetExternal(tb *testing.T) {
+	common, err := Compile([]byte(`{"$defs":{"Id":{"type":"string"}}}`))
+	if err != nil {
+		tb.Fatalf("compile common: %v", err)
+	}
+
+	var s Schema
+	s.AddDoc("urn:objects:common", common)
+
+	if err := s.Compile([]byte(`{"properties":{"id":{"$ref":"urn:objects:common#/$defs/Id"}}}`)); err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	t, node, err := s.RefTarget(refNode(tb, &s, "id"))
+	if err != nil {
+		tb.Fatalf("reftarget: %v", err)
+	}
+
+	if t != common {
+		tb.Fatalf("reftarget: got doc %p, want the registered one %p", t, common)
+	}
+
+	// The node belongs to the other document, so it reads through its Reader.
+	if got := TypesOf(t.Reader().Keyword(node, Type)); got != TypeString {
+		tb.Errorf("reftarget: target type %v, want %v", got, TypeString)
+	}
+}
+
+func TestRefTargetUnresolved(tb *testing.T) {
+	var s Schema
+	s.Resolve = func(base, ref string) ([]byte, error) { return []byte(`{"type":"string"}`), nil }
+
+	// The document loads, the fragment is not in it; compile defers both to apply.
+	if err := s.Compile([]byte(`{"$ref":"urn:x#/$defs/missing"}`)); err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	_, node, err := s.RefTarget(refNode(tb, &s, ""))
+	if !errors.Is(err, ErrRef) {
+		tb.Errorf("reftarget: err %v, want Is(ErrRef)", err)
+	}
+	if node != None {
+		tb.Errorf("reftarget: node %v, want None", node)
+	}
+}
+
 func TestResolveError(tb *testing.T) {
 	myErr := errors.New("boom")
 
