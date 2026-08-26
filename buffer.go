@@ -469,17 +469,31 @@ func (b BufferReader) NodesAt(op Opcode, i int) (k, v Opcode) {
 // matched whole, so any extension prefix falls into the same path. The value is
 // left to the caller to interpret; None is never a valid value.
 func (b BufferReader) Ext(op Opcode, key string) Opcode {
+	return b.named(op, Ext, key)
+}
+
+// Raw returns the value node of the keyword named key kept verbatim among the
+// keywords of schema node op (an All), or None if absent — an annotation the
+// vocabulary carries but never applies ("title", "format", "$comment"), or a
+// keyword outside it. An extension keyword is an Ext, not a Raw.
+func (b BufferReader) Raw(op Opcode, key string) Opcode {
+	return b.named(op, Raw, key)
+}
+
+// named finds the pair keyword of kind kind spelled key. Ext and Raw repeat
+// within an All, so unlike every other keyword they are reached by name.
+func (b BufferReader) named(op, kind Opcode, key string) Opcode {
 	if op.Op() != All {
 		panic(op.Op())
 	}
 
 	for _, ch := range b.Nodes(op) {
-		if ch.Op() != Ext {
+		if ch.Op() != kind {
 			continue
 		}
 
 		k, v := b.NodesAt(ch, 0)
-		if string(b.String(k)) == key {
+		if equalStringTo(b.Span(k), key) {
 			return v
 		}
 	}
@@ -525,7 +539,7 @@ func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
 // Keyword returns the keyword node of kind want among the keywords of schema
 // node op (an All), or None if absent. Every keyword is unique per schema, so the
 // match is unambiguous — except Ext and Raw, which repeat and are keyed by name;
-// look those up with Ext instead. Read the returned node with Deref, Nodes, or
+// look those up with Ext or Raw. Read the returned node with Deref, Nodes, or
 // its Imm, per the keyword.
 func (b BufferReader) Keyword(op, want Opcode) Opcode {
 	if op.Op() != All {
@@ -642,6 +656,30 @@ func equalString(l, r []byte) bool {
 	}
 
 	return i == le && j == re
+}
+
+// equalStringTo compares a JSON string token to a plain Go string the same way,
+// so a lookup by name never decodes a candidate into the buffer.
+func equalStringTo(l []byte, s string) bool {
+	if bytes.IndexByte(l, '\\') < 0 {
+		return string(l[1:len(l)-1]) == s
+	}
+
+	i, j := 1, 0 // past the opening quote
+	le := len(l) - 1
+
+	for i < le && j < len(s) {
+		ls, lr, ni := skip.DecodeRune(l, i, jsonEsc, 0)
+		sr, nj := utf8.DecodeRuneInString(s[j:])
+
+		if ls.Err() || lr != sr {
+			return false
+		}
+
+		i, j = ni, j+nj
+	}
+
+	return i == le && j == len(s)
 }
 
 // decodeBody appends to w the string that an unquoted JSON string body denotes.

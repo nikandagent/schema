@@ -103,6 +103,92 @@ func TestBufferExt(tb *testing.T) {
 	mustPanic(tb, "Ext(Type)", func() { b.Ext(typ, "x-type") })
 }
 
+func TestBufferRaw(tb *testing.T) {
+	s, err := Compile([]byte(`{"title":"T","description":"D","properties":{"a":{"title":"A"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	b := s.Reader()
+
+	if v := b.Raw(s.Root(), "title"); string(b.String(v)) != "T" {
+		tb.Errorf("raw title: got %q, want %q", b.String(v), "T")
+	}
+
+	if v := b.Raw(s.Root(), "description"); string(b.String(v)) != "D" {
+		tb.Errorf("raw description: got %q, want %q", b.String(v), "D")
+	}
+
+	if v := b.Raw(s.Root(), "format"); v != None {
+		tb.Errorf("raw format: got %v, want None", v)
+	}
+
+	subs := 0
+
+	for k, sub := range b.Iter(b.Keyword(s.Root(), Properties)) {
+		subs++
+
+		if got := string(b.String(b.Raw(sub, "title"))); got != "A" {
+			tb.Errorf("raw title of %q: got %q, want %q", b.String(k), got, "A")
+		}
+	}
+
+	if subs != 1 {
+		tb.Errorf("properties count: got %d, want 1", subs)
+	}
+
+	n, err := Compile([]byte(`{"type":"string"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if v := n.Reader().Raw(n.Root(), "title"); v != None {
+		tb.Errorf("raw title with no annotations: got %v, want None", v)
+	}
+
+	x, err := Compile([]byte(`{"title":"T","x-type":"custom"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	xb := x.Reader()
+
+	if v := xb.Raw(x.Root(), "x-type"); v != None {
+		tb.Errorf("raw x-type: got %v, want None", v)
+	}
+
+	if v := xb.Ext(x.Root(), "title"); v != None {
+		tb.Errorf("ext title: got %v, want None", v)
+	}
+
+	if v := xb.Ext(x.Root(), "x-type"); string(xb.String(v)) != "custom" {
+		tb.Errorf("ext x-type: got %q, want %q", xb.String(v), "custom")
+	}
+
+	m, err := Compile([]byte(`{"title":5}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if v := m.Reader().Raw(m.Root(), "title"); v.Op() != Number {
+		tb.Errorf("raw non-string title: got %v, want Number", v.Op())
+	}
+
+	e, err := Compile([]byte(`{"\u0074itle":"T"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	eb := e.Reader()
+
+	if v := eb.Raw(e.Root(), "title"); string(eb.String(v)) != "T" {
+		tb.Errorf("raw escaped title: got %q, want %q", eb.String(v), "T")
+	}
+
+	mustPanic(tb, "Raw(Properties)", func() { b.Raw(b.Keyword(s.Root(), Properties), "title") })
+	mustPanic(tb, "Raw(String)", func() { b.Raw(b.Raw(s.Root(), "title"), "title") })
+}
+
 func TestBufferKeyword(tb *testing.T) {
 	s, err := Compile([]byte(`{"type":"string"}`))
 	if err != nil {
