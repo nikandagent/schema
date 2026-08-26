@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"unicode/utf8"
 
 	"nikand.dev/go/json2"
 )
@@ -878,7 +879,7 @@ func (a *Applier) member(obj, key Opcode) (k, v Opcode, ok bool) {
 }
 
 func (a *Applier) keyEq(data, schema Opcode) bool {
-	return equalString(a.b.Reader().Span(data), a.s.prog.Reader().Span(schema))
+	return bytes.Equal(a.b.Reader().Span(data), a.s.prog.Reader().Span(schema))
 }
 
 func (a *Applier) idEq(id, schema Opcode) bool {
@@ -946,10 +947,7 @@ func (a *Applier) integral(val Opcode) bool {
 }
 
 func (a *Applier) strlen(val Opcode) int64 {
-	var d json2.Iterator
-
-	_, rs, _, _ := d.DecodedStringLength(a.b.Reader().Span(val), 0)
-	return int64(rs)
+	return int64(utf8.RuneCount(a.b.Reader().Span(val)))
 }
 
 func (a *Applier) Fail(code DiagCode, op, val Opcode) {
@@ -1047,7 +1045,7 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	case Null, True, False:
 		return true
 	case String:
-		return equalString(lb.Span(l), rb.Span(r))
+		return bytes.Equal(lb.Span(l), rb.Span(r))
 	case Array:
 		lo, ln := l.Off(), l.Arg()
 		ro, rn := r.Off(), r.Arg()

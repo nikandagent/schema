@@ -437,7 +437,7 @@ func TestWalkRead(tb *testing.T) {
 		tb.Fatalf("walk: %v", err)
 	}
 
-	want := map[string]bool{`"a"`: true, "1": true, `"b"`: true, `"x"`: true, "2": true}
+	want := map[string]bool{"a": true, "1": true, "b": true, "x": true, "2": true}
 	for g := range got {
 		if !want[g] {
 			tb.Errorf("unexpected scalar %q", g)
@@ -465,8 +465,8 @@ func TestWalkSchemaBuf(tb *testing.T) {
 				tb.Errorf("properties nodes: got %d words, want %d (arg=%d)", len(ns), 2*op.Arg(), op.Arg())
 			}
 
-			if got := string(c.SchemaReader().Span(ns[0])); got != `"a"` {
-				tb.Errorf("first property key: got %q, want %q", got, `"a"`)
+			if got := string(c.SchemaReader().Span(ns[0])); got != "a" {
+				tb.Errorf("first property key: got %q, want %q", got, "a")
 			}
 		}
 
@@ -849,7 +849,7 @@ func TestWalkEmit(tb *testing.T) {
 		bytes           string
 	}{
 		{`{}`, `5`, `42`, Number, `42`},
-		{`{}`, `"a"`, `"hi"`, String, `"hi"`},
+		{`{}`, `"a"`, `"hi"`, String, `hi`},
 		{`{"properties":{"a":{}}}`, `{"a":5,"b":7}`, `{"a":42,"b":7}`, Number, `42`}, // only governed scalar replaced
 	} {
 		s, err := Compile([]byte(tc.schema))
@@ -1044,6 +1044,71 @@ func TestSynthesized(tb *testing.T) {
 		// rather than at a bogus offset.
 		if len(d) != 0 && (d[0].Off != 0 || d[0].End != 0) {
 			tb.Errorf("walk synthesized against %s: span=%d:%d, want 0:0", tc.schema, d[0].Off, d[0].End)
+		}
+	}
+}
+
+func TestEscapedStrings(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"properties":{"caf\u00e9":{"pattern":"^a+$"}}}`, `{"café":"aaa"}`, true},
+		{`{"properties":{"caf\u00e9":{"pattern":"^a+$"}}}`, `{"café":"bbb"}`, false},
+		{`{"properties":{"café":{"pattern":"^\u0061+$"}}}`, `{"caf\u00e9":"aaa"}`, true},
+		{`{"properties":{"café":{"pattern":"^\u0061+$"}}}`, `{"caf\u00e9":"bbb"}`, false},
+		{`{"required":["caf\u00e9"]}`, `{"café":1}`, true},
+		{`{"required":["café"]}`, `{"tea":1}`, false},
+		{`{"$defs":{"caf\u00e9":{"type":"integer"}},"$ref":"#/$defs/café"}`, `5`, true},
+		{`{"$defs":{"café":{"type":"integer"}},"$ref":"#/$defs/caf\u00e9"}`, `"x"`, false},
+		{`{"enum":["caf\u00e9"]}`, `"café"`, true},
+		{`{"enum":["café"]}`, `"caf\u00e9"`, true},
+		{`{"enum":["café"]}`, `"tea"`, false},
+		{`{"const":"caf\u00e9"}`, `"café"`, true},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		d, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %q against %q: %v", tc.data, tc.schema, err)
+			continue
+		}
+
+		if (len(d) == 0) != tc.ok {
+			tb.Errorf("validate %q against %q: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, d)
+		}
+	}
+}
+
+func TestStrLenRunes(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		ok           bool
+	}{
+		{`{"minLength":4,"maxLength":4}`, `"café"`, true},
+		{`{"minLength":4,"maxLength":4}`, `"caf\u00e9"`, true},
+		{`{"maxLength":3}`, `"café"`, false},
+		{`{"maxLength":3}`, `"caf\u00e9"`, false},
+		{`{"minLength":5}`, `"café"`, false},
+	} {
+		s, err := Compile([]byte(tc.schema))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.schema, err)
+			continue
+		}
+
+		d, err := s.Validate([]byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %q against %q: %v", tc.data, tc.schema, err)
+			continue
+		}
+
+		if (len(d) == 0) != tc.ok {
+			tb.Errorf("validate %q against %q: ok=%v, diag=%v", tc.data, tc.schema, tc.ok, d)
 		}
 	}
 }

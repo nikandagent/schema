@@ -64,7 +64,7 @@ func TestAt(tb *testing.T) {
 	// whole doc: root required + both wrong scalars.
 	run("whole", nil,
 		"missing required property@"+string(doc),
-		"wrong type@42", "wrong type@\"bad\"", "wrong type@99")
+		"wrong type@42", "wrong type@bad", "wrong type@99")
 
 	// scalar leaf: only that value, ancestors skipped.
 	run("title", []Option{At("title")}, "wrong type@99")
@@ -77,7 +77,7 @@ func TestAt(tb *testing.T) {
 
 	// Each fans out over every element; only the bad ones report.
 	run("users[].name", []Option{At("users", Each, "name")}, "wrong type@42")
-	run("users[].age", []Option{At("users", Each, "age")}, "wrong type@\"bad\"")
+	run("users[].age", []Option{At("users", Each, "age")}, "wrong type@bad")
 
 	// a valid leaf produces nothing (and still no ancestor required).
 	run("users[0].name", []Option{At("users", 0, "name")})
@@ -99,12 +99,12 @@ func TestAtPrefixItems(tb *testing.T) {
 		wantSet(tb, name, doc, d, want...)
 	}
 
-	run("whole", nil, "wrong type@\"a\"", "wrong type@1", "wrong type@2", "wrong type@3")
-	run("[0]", []Option{At(0)}, "wrong type@\"a\"")
+	run("whole", nil, "wrong type@a", "wrong type@1", "wrong type@2", "wrong type@3")
+	run("[0]", []Option{At(0)}, "wrong type@a")
 	run("[1]", []Option{At(1)}, "wrong type@1")
 	run("[2]", []Option{At(2)}, "wrong type@2")
 	run("[-1]", []Option{At(-1)}, "wrong type@3")
-	run("[]", []Option{At(Each)}, "wrong type@\"a\"", "wrong type@1", "wrong type@2", "wrong type@3")
+	run("[]", []Option{At(Each)}, "wrong type@a", "wrong type@1", "wrong type@2", "wrong type@3")
 
 	ok := mustCompile(tb, `{"prefixItems":[{"type":"string"},{"type":"integer"}],"items":{"type":"integer"}}`)
 	if d, err := ok.Walk(doc, nil, At(2)); err != nil || len(d) != 0 {
@@ -230,7 +230,7 @@ func TestAtPatternProps(tb *testing.T) {
 	if err != nil {
 		tb.Fatalf("unexpected error: %v", err)
 	}
-	wantSet(tb, "pattern key", doc, d, "wrong type@\"str\"")
+	wantSet(tb, "pattern key", doc, d, "wrong type@str")
 
 	// a key matched by no pattern is unconstrained -> no diags.
 	d, _ = sc.Walk(doc, nil, At("yb"))
@@ -255,7 +255,7 @@ func TestAtAdditionalFalse(tb *testing.T) {
 
 	// a declared property still validates against its own subschema.
 	d, _ = sc.Walk([]byte(`{"a":"nope"}`), nil, At("a"))
-	wantSet(tb, "declared key", []byte(`{"a":"nope"}`), d, "wrong type@\"nope\"")
+	wantSet(tb, "declared key", []byte(`{"a":"nope"}`), d, "wrong type@nope")
 }
 
 // TestAtBadKey: a path step that is neither string/[]byte, int, nor Each is a

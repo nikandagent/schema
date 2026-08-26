@@ -125,7 +125,7 @@ func TestSource(tb *testing.T) {
 		span string
 	}{
 		{root, `{"a":[1,"x",null]}`},
-		{r.Nodes(root)[0], `"a"`},
+		{r.Nodes(root)[0], `a`},
 		{r.Nodes(root)[1], `[1,"x",null]`},
 		{r.Nodes(r.Nodes(root)[1])[0], `1`},
 		{r.Nodes(r.Nodes(root)[1])[2], `null`},
@@ -157,6 +157,38 @@ func TestSource(tb *testing.T) {
 
 		r.Span(w.Int(5))
 	}()
+}
+
+func TestSourceEscaped(tb *testing.T) {
+	var b Buffer
+
+	b.Reset()
+
+	src := []byte(`["ab","a\u0062"]`)
+
+	root, err := b.decode(src)
+	if err != nil {
+		tb.Fatalf("decode: %v", err)
+	}
+
+	r := b.Reader()
+	plain, esc := r.Nodes(root)[0], r.Nodes(root)[1]
+
+	off, end, ok := r.Source(plain)
+	if !ok || string(src[off:end]) != "ab" {
+		tb.Errorf("source of plain string: %d:%d ok=%v, want the bare body", off, end, ok)
+	}
+
+	// decoding moved it to the text tail, so it kept its value but lost its place
+	if off, end, ok := r.Source(esc); ok {
+		tb.Errorf("source of escaped string: %d:%d ok=true, want no source", off, end)
+	}
+
+	for _, op := range []Opcode{plain, esc} {
+		if got := string(r.String(op)); got != "ab" {
+			tb.Errorf("string: got %q, want %q", got, "ab")
+		}
+	}
 }
 
 // TestCopyFrom copies a value across arenas, including synthesized words that

@@ -61,8 +61,8 @@ func TestBufferNodesAt(tb *testing.T) {
 	props := b.Keyword(s.Root(), Properties)
 
 	k, _ = b.NodesAt(props, -1)
-	if got := string(b.Span(k)); got != `"b"` {
-		tb.Errorf("properties at -1 key: got %q, want %q", got, `"b"`)
+	if got := string(b.Span(k)); got != "b" {
+		tb.Errorf("properties at -1 key: got %q, want %q", got, "b")
 	}
 }
 
@@ -369,18 +369,19 @@ func TestBufferString(tb *testing.T) {
 
 	// a Key is the bytes At was given, verbatim
 	for _, in := range []string{`key`, `a\u0062`, `a\z`} {
-		if got := string(r.Span(w.Span(Key, []byte(in)))); got != in {
+		op := w.Span(Key, []byte(in))
+
+		if got := string(r.String(op)); got != in {
+			tb.Errorf("string Key %q: got %q", in, got)
+		}
+		if got := string(r.Span(op)); got != in {
 			tb.Errorf("span Key %q: got %q", in, got)
 		}
 	}
 
-	mustPanic(tb, "String(Key)", func() { r.String(w.Span(Key, []byte(`key`))) })
+	mustPanic(tb, "String(Number)", func() { r.String(w.Span(Number, []byte(`5`))) })
 	mustPanic(tb, "String(IntLit)", func() { r.String(w.Int(5)) })
 	mustPanic(tb, "String(Null)", func() { r.String(w.Null()) })
-
-	// a corrupt program, not bad input
-	mustPanic(tb, "String(unquoted)", func() { r.String(w.Span(String, []byte(`abc`))) })
-	mustPanic(tb, "String(bad escape)", func() { r.String(w.Span(String, []byte(`"a\z"`))) })
 }
 
 func TestBufferDeref(tb *testing.T) {

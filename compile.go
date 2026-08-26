@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"regexp"
@@ -623,7 +624,9 @@ func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
 		return 0, j, err
 	}
 
-	return makeNode(Pattern, i, j-i), j, nil
+	op, err := s.prog.str(b, i, j, Pattern, false)
+
+	return op, j, err
 }
 
 func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
@@ -644,18 +647,16 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	}
 
 	// any URI-reference: "#..." internal, "doc#frag" external (resolved via docs).
-	off, n := i+1, j-i-2 // strip the quotes
-	if n < 1 {
+	if j-i-2 < 1 { // nothing between the quotes
 		return 0, i, serr(EmptyRef, Ref, st, j-st, ErrKeyword)
 	}
 
-	return makeNode(Ref, off, n), j, nil
+	op, err := s.prog.str(b, i, j, Ref, false)
+
+	return op, j, err
 }
 
-// refString is the pointer a Ref denotes. The node holds the token content with
-// the quotes stripped but the escapes intact, while $defs names and $anchor
-// fragments are stored decoded — so a ref spelled "#/$defs/a" has to be
-// decoded here to match the def named "#/$defs/a".
+// refString is the pointer a Ref denotes.
 func (s *Schema) refString(op Opcode) string {
 	return string(s.prog.Reader().String(op))
 }
@@ -744,7 +745,10 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 		return 0, kend, err
 	}
 
-	key := makeNode(String, kst, kend-kst)
+	key, err := s.prog.str(b, kst, kend, String, false)
+	if err != nil {
+		return 0, kend, err
+	}
 
 	val, i, err := s.literal(b, st)
 	if err != nil {
@@ -805,14 +809,7 @@ func (s *Schema) checkPatterns() error {
 			continue
 		}
 
-		var d json2.Iterator
-
-		src, _, err := d.DecodeString(s.prog.Reader().Span(op), 0, nil)
-		if err != nil {
-			return err
-		}
-
-		re, err := regexp.Compile(string(src))
+		re, err := regexp.Compile(string(s.prog.Reader().Span(op)))
 		if err != nil {
 			reason := strings.TrimPrefix(err.Error(), "error parsing regexp: ")
 			return serr(BadPattern, op, op.OffInt(), op.ArgInt(), fmt.Errorf("%w: %s", ErrPattern, reason))
@@ -1156,7 +1153,7 @@ func (s *Schema) propIndex(props, name Opcode) int {
 	off, n := props.OffInt(), props.ArgInt()
 
 	for i := range n {
-		if equalString(s.prog.Reader().Span(s.prog.code[off+2*i]), s.prog.Reader().Span(name)) {
+		if bytes.Equal(s.prog.Reader().Span(s.prog.code[off+2*i]), s.prog.Reader().Span(name)) {
 			return i
 		}
 	}

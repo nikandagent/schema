@@ -5,7 +5,6 @@ import (
 	"iter"
 	"math"
 	"strconv"
-	"unicode/utf8"
 
 	"nikand.dev/go/json2"
 	"nikand.dev/go/skip"
@@ -88,21 +87,22 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 	case json2.Array:
 		return b.array(r, i, intern)
 	case json2.String, json2.Number:
-		op := String
-		if tp == json2.Number {
-			op = Number
-		}
-
 		j, err := d.Skip(r, i)
 		if err != nil {
 			return 0, j, err
 		}
 
-		if intern {
-			return b.Writer().Span(op, r[i:j]), j, nil
+		if tp == json2.Number {
+			if intern {
+				return b.Writer().Span(Number, r[i:j]), j, nil
+			}
+
+			return makeNode(Number, i, j-i), j, nil
 		}
 
-		return makeNode(op, i, j-i), j, nil
+		val, err := b.str(r, i, j, String, intern)
+
+		return val, j, err
 	case json2.Null:
 		j, err := d.Skip(r, i)
 		if err != nil {
@@ -125,6 +125,33 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 	default:
 		return 0, i, json2.ErrSyntax
 	}
+}
+
+// str stores the string token r[i:j] under opcode op. A string node holds the
+// string itself, never its spelling, so an unescaped token is the source body
+// as it stands and costs no copy; only an escaped one is decoded into the text
+// tail, and gives up its source position by moving there.
+func (b *Buffer) str(r []byte, i, j int, op Opcode, intern bool) (Opcode, error) {
+	tok := r[i:j]
+
+	if bytes.IndexByte(tok, '\\') < 0 {
+		if intern {
+			return b.Writer().Span(op, tok[1:len(tok)-1]), nil
+		}
+
+		return makeNode(op, i+1, j-i-2), nil
+	}
+
+	off := len(b.src) + len(b.text)
+
+	s, text, _, _ := skip.DecodeString(tok, 0, skip.Dqt|skip.StrEscapes, b.text)
+	if s.Err() {
+		return 0, json2.ErrSyntax
+	}
+
+	b.text = text
+
+	return makeNode(op, off, len(b.src)+len(b.text)-off), nil
 }
 
 func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
@@ -204,12 +231,7 @@ func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
 }
 
 func (b BufferWriter) Bytes(s []byte) Opcode {
-	var e json2.Emitter
-
-	off := len(b.src) + len(b.text)
-	b.text = e.AppendString(b.text, s)
-
-	return makeNode(String, off, len(b.src)+len(b.text)-off)
+	return b.Span(String, s)
 }
 
 func (b BufferWriter) String(s string) Opcode {
@@ -303,8 +325,12 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 		return append(w, "true"...)
 	case False:
 		return append(w, "false"...)
-	case Number, String:
+	case Number:
 		return append(w, b.Span(val)...)
+	case String:
+		var e json2.Emitter
+
+		return e.AppendString(w, b.Span(val))
 	case IntLit:
 		return strconv.AppendInt(w, val.Imm(), 10)
 	case FltLit:
@@ -344,13 +370,14 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 	}
 }
 
-// Span is the node's JSON token bytes, decoded from the input or written into
-// the text tail — the two are one address space here, so the caller need not
-// care which. The result is empty for a node whose kind carries a token but this
-// one has none: a synthesized container, or a bare null/true/false word. It
-// panics on a kind that never carries one (IntLit, FltLit, None) — that is a
-// property of the opcode, not of the value, so it cannot depend on where the
-// node came from. Ask Source when the origin is what you need.
+// Span is the node's bytes, read from the input or written into the text tail —
+// the two are one address space here, so the caller need not care which. A
+// string kind holds the string itself, decoded; a Number holds its lexeme. The
+// result is empty for a node whose kind carries bytes but this one has none: a
+// synthesized container, or a bare null/true/false word. It panics on a kind
+// that never carries any (IntLit, FltLit, None) — that is a property of the
+// opcode, not of the value, so it cannot depend on where the node came from.
+// Ask Source when the origin is what you need.
 func (b BufferReader) Span(op Opcode) []byte {
 	off, end := b.span(op)
 
@@ -381,6 +408,8 @@ func (b BufferReader) span(op Opcode) (off, end int) {
 // Source locates op in the input bytes. Values decoded from src carry their
 // source span; values synthesized through BufferWriter do not — ok is false and
 // off/end are zero, which is the normal case for a node a Walk handler produced.
+// A string that had escapes reads the same way: decoding moved it to the text
+// tail, so it keeps its value but loses its place in the input.
 // Use it for diagnostics; Span reads the bytes and has no answer for a node that
 // never was text. Panics on a word that is not a value node.
 //
@@ -493,7 +522,7 @@ func (b BufferReader) named(op, kind Opcode, key string) Opcode {
 		}
 
 		k, v := b.NodesAt(ch, 0)
-		if equalStringTo(b.Span(k), key) {
+		if string(b.Span(k)) == key {
 			return v
 		}
 	}
@@ -568,148 +597,16 @@ func (b BufferReader) Deref(op Opcode) Opcode {
 	}
 }
 
-// String returns decoded string as bytes.
-// Result lifetime is until any other method of that buffer is called.
-//
-// Pattern is a quoted token like String. Ref is the odd one: it holds the body
-// alone, escapes intact, so it decodes by the same rules without the quotes.
+// String is the string a String, Pattern, Ref or Key node holds. Strings are
+// stored decoded, so this is the node's own bytes: no copy, no scratch, valid
+// for as long as the buffer is not rewritten.
 func (b BufferReader) String(op Opcode) []byte {
 	switch op.Op() {
-	case String, Pattern:
-	case Ref:
-		return b.body(op)
+	case String, Pattern, Ref, Key:
+		return b.Span(op)
 	default:
 		panic(op.Op())
 	}
-
-	sp := b.Span(op)
-
-	s, _, _, _ := skip.String(sp, 0, skip.Dqt)
-	if s.Err() {
-		panic(string(sp))
-	}
-
-	if !s.Is(skip.Escapes) {
-		return sp[1 : len(sp)-1]
-	}
-
-	mark := len(b.text)
-	defer func() { b.text = b.text[:mark] }()
-
-	s, b.text, _, _ = skip.DecodeString(sp, 0, skip.Dqt|skip.StrEscapes, b.text)
-	if s.Err() {
-		panic(string(sp))
-	}
-
-	return b.text[mark:]
-}
-
-func (b BufferReader) body(op Opcode) []byte {
-	sp := b.Span(op)
-	if bytes.IndexByte(sp, '\\') < 0 {
-		return sp
-	}
-
-	mark := len(b.text)
-	defer func() { b.text = b.text[:mark] }()
-
-	w, ok := decodeBody(b.text, sp)
-	if !ok {
-		panic(string(sp))
-	}
-
-	b.text = w
-
-	return w[mark:]
-}
-
-// jsonEsc is the escape set defaultString enables for a double-quoted string, so
-// equalString decodes exactly what String does.
-const jsonEsc = skip.Dqt | skip.EscControl | skip.EscXX | skip.EscU4 | skip.EscU8
-
-// equalString compares two JSON string tokens by the string they denote. One
-// string has many spellings — "a" and "\u0061" — so equal bytes prove equality
-// but unequal bytes prove nothing. Escaped tokens are then walked a rune at a
-// time; neither side is ever decoded into a buffer.
-func equalString(l, r []byte) bool {
-	if bytes.Equal(l, r) {
-		return true
-	}
-
-	// With no escape on either side the bytes were the whole answer.
-	if bytes.IndexByte(l, '\\') < 0 && bytes.IndexByte(r, '\\') < 0 {
-		return false
-	}
-
-	i, j := 1, 1 // past the opening quote
-	le, re := len(l)-1, len(r)-1
-
-	for i < le && j < re {
-		ls, lr, ni := skip.DecodeRune(l, i, jsonEsc, 0)
-		rs, rr, nj := skip.DecodeRune(r, j, jsonEsc, 0)
-
-		if ls.Err() || rs.Err() || lr != rr {
-			return false
-		}
-
-		i, j = ni, nj
-	}
-
-	return i == le && j == re
-}
-
-// equalStringTo compares a JSON string token to a plain Go string the same way,
-// so a lookup by name never decodes a candidate into the buffer.
-func equalStringTo(l []byte, s string) bool {
-	if bytes.IndexByte(l, '\\') < 0 {
-		return string(l[1:len(l)-1]) == s
-	}
-
-	i, j := 1, 0 // past the opening quote
-	le := len(l) - 1
-
-	for i < le && j < len(s) {
-		ls, lr, ni := skip.DecodeRune(l, i, jsonEsc, 0)
-		sr, nj := utf8.DecodeRuneInString(s[j:])
-
-		if ls.Err() || lr != sr {
-			return false
-		}
-
-		i, j = ni, j+nj
-	}
-
-	return i == le && j == len(s)
-}
-
-// decodeBody appends to w the string that an unquoted JSON string body denotes.
-// Nodes that hold their content without the quotes — Ref — have no token for the
-// usual decoders to chew on, so they come through here.
-func decodeBody(w, s []byte) ([]byte, bool) {
-	for i := 0; i < len(s); {
-		st, r, j := skip.DecodeRune(s, i, jsonEsc, 0)
-		if st.Err() {
-			return w, false
-		}
-
-		w = utf8.AppendRune(w, r)
-		i = j
-	}
-
-	return w, true
-}
-
-func (b BufferReader) DecodeString(op Opcode, buf []byte) ([]byte, error) {
-	if op.Op() != String {
-		panic(op.Op())
-	}
-
-	var d json2.Iterator
-
-	sp := b.Span(op)
-
-	buf, _, err := d.DecodeString(sp, 0, buf)
-	return buf, err
 }
 
 // Int, Int64, and Float read a numeric value node, whether it was decoded from

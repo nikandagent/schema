@@ -19,10 +19,10 @@ func TestFormat(tb *testing.T) {
 		{in: `{"minProperties":1,"maxProperties":3}`},
 		{in: `{"properties":{"a":{"type":"integer"}},"required":["a"]}`},
 		// required is reordered to follow properties, and an escaped name is the
-		// same name — it sorts into its property's slot, not past the end.
+		// same name — it sorts into its property's slot and formats decoded.
 		{
 			in:  `{"properties":{"a":{},"b":{}},"required":["b","\u0061"]}`,
-			out: `{"properties":{"a":{},"b":{}},"required":["\u0061","b"]}`,
+			out: `{"properties":{"a":{},"b":{}},"required":["a","b"]}`,
 		},
 		{in: `{"enum":[1,"x",null,true]}`},
 		{in: `{"const":{"a":[1,2]}}`},
@@ -99,6 +99,52 @@ func TestFormat(tb *testing.T) {
 		got := string(s.Format(nil))
 		if got != want {
 			tb.Errorf("format %q: got %q, want %q", tc.in, got, want)
+		}
+	}
+}
+
+func TestFormatEscapes(tb *testing.T) {
+	for _, tc := range []struct {
+		in, out string
+	}{
+		{in: `{"title":"caf\u00e9"}`, out: `{"title":"café"}`},
+		{in: `{"properties":{"caf\u00e9":{"pattern":"^\u0061+$"}},"required":["caf\u00e9"]}`,
+			out: `{"properties":{"café":{"pattern":"^a+$"}},"required":["café"]}`},
+		{in: `{"$defs":{"caf\u00e9":{"type":"integer"}},"$ref":"#/$defs/caf\u00e9"}`,
+			out: `{"$ref":"#/$defs/café","$defs":{"café":{"type":"integer"}}}`},
+		{in: `{"enum":["caf\u00e9","\u0061"]}`, out: `{"enum":["café","a"]}`},
+
+		{in: `{"title":"a\"b"}`},
+		{in: `{"title":"a\\b"}`},
+		{in: `{"title":"a\nb"}`},
+		{in: `{"title":"a\u0007b"}`},
+		{in: `{"const":"café"}`},
+	} {
+		want := tc.out
+		if want == "" {
+			want = tc.in
+		}
+
+		s, err := Compile([]byte(tc.in))
+		if err != nil {
+			tb.Errorf("compile %q: %v", tc.in, err)
+			continue
+		}
+
+		got := string(s.Format(nil))
+		if got != want {
+			tb.Errorf("format %q: got %q, want %q", tc.in, got, want)
+			continue
+		}
+
+		var t Schema
+		if err := t.Compile([]byte(got)); err != nil {
+			tb.Errorf("recompile %q: %v", got, err)
+			continue
+		}
+
+		if again := string(t.Format(nil)); again != got {
+			tb.Errorf("format twice %q: got %q, want %q", tc.in, again, got)
 		}
 	}
 }

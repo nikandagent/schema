@@ -3,6 +3,8 @@ package schema
 import (
 	"bytes"
 	"strconv"
+
+	"nikand.dev/go/json2"
 )
 
 // Format reconstructs the schema document from the program in canonical form.
@@ -19,15 +21,23 @@ func (s *Schema) FormatNode(w []byte, op Opcode) []byte {
 }
 
 // appendRef writes a ref pointer, collapsing the legacy definitions prefix.
+// appendRef emits a $ref pointer, rewriting the legacy $defs location on the way
+// out. The pointer is a string like any other, so it is encoded, not appended.
 func appendRef(w, p []byte) []byte {
 	const legacy = "#/definitions/"
 
+	var e json2.Emitter
+
+	w = append(w, '"')
+
 	if bytes.HasPrefix(p, []byte(legacy)) {
-		w = append(w, "#/$defs/"...)
-		return append(w, p[len(legacy):]...)
+		w = e.AppendStringContent(w, []byte("#/$defs/"))
+		p = p[len(legacy):]
 	}
 
-	return append(w, p...)
+	w = e.AppendStringContent(w, p)
+
+	return append(w, '"')
 }
 
 func (s *Schema) dump(w []byte, op Opcode) []byte {
@@ -132,6 +142,8 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case PatternProps:
 		off, n := op.Off(), op.Arg()
 
+		var e json2.Emitter
+
 		w = append(w, '{')
 
 		for i := range n {
@@ -139,7 +151,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 				w = append(w, ',')
 			}
 
-			w = append(w, s.prog.Reader().Span(s.prog.code[off+2*i])...)
+			w = e.AppendString(w, s.prog.Reader().Span(s.prog.code[off+2*i]))
 			w = append(w, ':')
 			w = s.format(w, s.prog.code[off+2*i+1])
 		}
@@ -159,11 +171,11 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 
 		return append(w, "true"...)
 	case Pattern:
-		return append(w, s.prog.Reader().Span(op)...)
+		var e json2.Emitter
+
+		return e.AppendString(w, s.prog.Reader().Span(op))
 	case Ref:
-		w = append(w, '"')
-		w = appendRef(w, s.prog.Reader().Span(op))
-		return append(w, '"')
+		return appendRef(w, s.prog.Reader().Span(op))
 	default:
 		panic(op.Op())
 	}
