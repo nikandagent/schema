@@ -170,6 +170,8 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		}
 
 		return append(w, "true"...)
+	case Format:
+		return append(append(append(w, '"'), formatNames[op.Imm()]...), '"')
 	case Pattern:
 		var e json2.Emitter
 
@@ -281,6 +283,8 @@ func keywordName(op Opcode) string {
 		return "uniqueItems"
 	case Pattern:
 		return "pattern"
+	case Format:
+		return "format"
 	case Ref:
 		return "$ref"
 	default:

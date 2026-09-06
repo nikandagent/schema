@@ -63,7 +63,7 @@ func TestFormat(tb *testing.T) {
 		{in: `{"$ref":"#"}`},
 
 		{in: `{"x-zeta":1,"x-alpha":2,"type":"string"}`, out: `{"type":"string","x-alpha":2,"x-zeta":1}`},
-		{in: `{"format":"email","$comment":"c","type":"string"}`, out: `{"type":"string","$comment":"c","format":"email"}`},
+		{in: `{"format":"email","$comment":"c","type":"string"}`, out: `{"type":"string","format":"email","$comment":"c"}`},
 		{in: `{"format":"email","x-foo":1,"description":"d","title":"t","type":"string"}`,
 			out: `{"title":"t","description":"d","type":"string","x-foo":1,"format":"email"}`},
 

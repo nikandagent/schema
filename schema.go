@@ -49,6 +49,8 @@ const (
 	SchemaRejectUnsupported                   // reject recognized-but-unimplemented keywords (if, contains, ...)
 	KeepKeyOrder                              // keep input object-key order, don't reorder to properties
 	KeepMissing                               // keep missing properties absent, don't fill defaults
+	AssertStringFormat                        // check "format" instead of carrying it as an annotation
+	AssertEmailUseful                         // judge "email" as people write them: no quoted local part, no address literal
 )
 
 // DataPreserve rewrites data without changing its content: no reordering and no
@@ -115,6 +117,7 @@ const (
 	MaxItems
 	MinProps
 	MaxProps
+	Format
 	Canon
 
 	None

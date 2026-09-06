@@ -273,6 +273,11 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		return a.checkAdditional(op, val, h)
 	case PatternProps:
 		return a.checkPatternProps(op, val, h)
+	case Format:
+		if a.s.Flags.Is(AssertStringFormat) && val.Op() == String &&
+			!formatOK(a.b.Reader().Span(val), strFormat(op.Imm()), a.s.Flags) {
+			a.Fail(FormatMismatch, op, val)
+		}
 	case Pattern:
 		if val.Op() == String && !a.s.patterns[op].Match(a.b.Reader().String(val)) {
 			a.Fail(PatternMismatch, op, val)

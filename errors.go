@@ -50,6 +50,7 @@ const (
 	MustMatchEnum
 	MustConst
 	PatternMismatch
+	FormatMismatch
 	MustNotMatch
 	MustMatchAny
 	MustMatchOne
@@ -101,6 +102,7 @@ var diagText = [...]string{
 	MustMatchEnum:     "not in enum",
 	MustConst:         "not the const value",
 	PatternMismatch:   "does not match pattern",
+	FormatMismatch:    "does not match format",
 	MustNotMatch:      "matches a forbidden schema",
 	MustMatchAny:      "matches none of the schemas",
 	MustMatchOne:      "must match exactly one schema",

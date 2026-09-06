@@ -289,6 +289,8 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 		return s.kwUnique(b, st)
 	case "pattern":
 		return s.kwPattern(b, st)
+	case "format":
+		return s.kwFormat(name, b, kst, st)
 	case "$ref":
 		return s.kwRef(b, st)
 	case "$defs", "definitions":
@@ -605,6 +607,34 @@ func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
 	}
 
 	return makeImm(Unique, 1), i, nil
+}
+
+// kwFormat compiles a format we assert into one word. Any other name stays an
+// annotation, kept verbatim: the spec has a validator ignore what it does not
+// know rather than fail, and the document still round-trips.
+func (s *Schema) kwFormat(name, b []byte, kst, st int) (Opcode, int, error) {
+	var d json2.Iterator
+
+	tp, i, err := d.Type(b, st)
+	if err != nil {
+		return 0, i, err
+	}
+
+	if tp != json2.String {
+		return 0, i, serr(MustBeString, Format, st, i-st, ErrKeyword)
+	}
+
+	fname, i, err := d.Key(b, i)
+	if err != nil {
+		return 0, i, err
+	}
+
+	f := formatOf(fname)
+	if f == 0 {
+		return s.kwUnknown(name, b, kst, st)
+	}
+
+	return makeImm(Format, int(f)), i, nil
 }
 
 func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
@@ -956,7 +986,7 @@ func annotationKeyword(name []byte) bool {
 	switch string(name) {
 	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
 		"title", "description", "examples", "readOnly", "writeOnly", "deprecated",
-		"format", "contentEncoding", "contentMediaType", "contentSchema":
+		"contentEncoding", "contentMediaType", "contentSchema":
 		return true
 	}
 
@@ -968,7 +998,7 @@ var keywordOrder = []Opcode{
 	Type, Ext,
 	Enum, Const,
 	Minimum, Maximum, ExclMin, ExclMax, MultipleOf,
-	MinLen, MaxLen, Pattern,
+	MinLen, MaxLen, Pattern, Format,
 	MinItems, MaxItems, Unique, Prefix, Items,
 	MinProps, MaxProps, Properties, Required, PatternProps, Additional,
 	Not, AllOf, AnyOf, OneOf,
