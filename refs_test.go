@@ -338,3 +338,150 @@ func TestResolveError(tb *testing.T) {
 		tb.Errorf("resolve error: got %v, want %v", err, myErr)
 	}
 }
+
+func TestResolveTransitive(tb *testing.T) {
+	var calls [][2]string
+
+	var s Schema
+	s.ID = "urn:a"
+	s.Resolve = func(base, ref string) ([]byte, error) {
+		calls = append(calls, [2]string{base, ref})
+
+		switch ref {
+		case "urn:b":
+			return []byte(`{"properties":{"c":{"$ref":"urn:c#"}}}`), nil
+		case "urn:c":
+			return []byte(`{"type":"integer"}`), nil
+		}
+
+		return nil, errors.New("unknown " + ref)
+	}
+
+	if err := s.Compile([]byte(`{"properties":{"b":{"$ref":"urn:b#"}}}`)); err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	if d, err := s.Validate([]byte(`{"b":{"c":5}}`)); err != nil || len(d) != 0 {
+		tb.Fatalf("validate ok: err=%v diag=%v", err, d)
+	}
+
+	if d, _ := s.Validate([]byte(`{"b":{"c":"x"}}`)); len(d) == 0 {
+		tb.Errorf("validate bad: want invalid")
+	}
+
+	want := [][2]string{{"urn:a", "urn:b"}, {"urn:b", "urn:c"}}
+	if len(calls) != len(want) {
+		tb.Fatalf("resolve calls %v, want %v", calls, want)
+	}
+
+	for i, w := range want {
+		if calls[i] != w {
+			tb.Errorf("resolve call %d: %v, want %v", i, calls[i], w)
+		}
+	}
+}
+
+func TestIDBase(tb *testing.T) {
+	for _, tc := range []struct {
+		id, text, want string
+	}{
+		{"urn:root", `{"$ref":"urn:sib#"}`, "urn:root"},
+		{"urn:provided", `{"$id":"urn:from-text","$ref":"urn:sib#"}`, "urn:from-text"},
+		{"", `{"$id":"urn:from-text","$ref":"urn:sib#"}`, "urn:from-text"},
+	} {
+		var base string
+
+		var s Schema
+		s.ID = tc.id
+		s.Resolve = func(b, ref string) ([]byte, error) {
+			base = b
+			return []byte(`{"type":"string"}`), nil
+		}
+
+		if err := s.Compile([]byte(tc.text)); err != nil {
+			tb.Errorf("compile %q: %v", tc.text, err)
+			continue
+		}
+
+		if s.ID != tc.want {
+			tb.Errorf("compile %q with ID %q: ID=%q, want %q", tc.text, tc.id, s.ID, tc.want)
+		}
+
+		if d, err := s.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+			tb.Errorf("validate %q: err=%v diag=%v", tc.text, err, d)
+			continue
+		}
+
+		if base != tc.want {
+			tb.Errorf("resolve base %q, want %q", base, tc.want)
+		}
+	}
+}
+
+func TestIDSelfRegistered(tb *testing.T) {
+	for _, tc := range []struct {
+		id, text string
+		hook     bool
+	}{
+		{"urn:root", `{"$defs":{"X":{"type":"integer"}},"properties":{"a":{"$ref":"urn:root#/$defs/X"}}}`, true},
+		{"urn:root", `{"$defs":{"X":{"type":"integer"}},"properties":{"a":{"$ref":"urn:root#/$defs/X"}}}`, false},
+		{"", `{"$id":"urn:self","$defs":{"X":{"type":"integer"}},"properties":{"a":{"$ref":"urn:self#/$defs/X"}}}`, false},
+		{"urn:provided", `{"$id":"urn:self","$defs":{"X":{"type":"integer"}},"properties":{"a":{"$ref":"urn:self#/$defs/X"}}}`, false},
+	} {
+		var s Schema
+		s.ID = tc.id
+
+		if tc.hook {
+			s.Resolve = func(base, ref string) ([]byte, error) {
+				tb.Errorf("Resolve called for a self-ref: base=%q ref=%q", base, ref)
+				return nil, errors.New("unexpected")
+			}
+		}
+
+		if err := s.Compile([]byte(tc.text)); err != nil {
+			tb.Errorf("compile %q with ID %q: %v", tc.text, tc.id, err)
+			continue
+		}
+
+		if d, err := s.Validate([]byte(`{"a":5}`)); err != nil || len(d) != 0 {
+			tb.Errorf("validate ok %q: err=%v diag=%v", tc.text, err, d)
+		}
+
+		if d, _ := s.Validate([]byte(`{"a":"x"}`)); len(d) == 0 {
+			tb.Errorf("validate bad %q: want invalid", tc.text)
+		}
+	}
+}
+
+func TestAddDocNames(tb *testing.T) {
+	doc, err := Compile([]byte(`{"type":"string"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	var parent Schema
+	parent.AddDoc("urn:x", doc)
+
+	if doc.ID != "urn:x" {
+		tb.Errorf("doc.ID=%q, want %q", doc.ID, "urn:x")
+	}
+}
+
+func TestNoIDInternalRefs(tb *testing.T) {
+	s, err := Compile([]byte(`{"$defs":{"X":{"type":"integer"}},"properties":{"a":{"$ref":"#/$defs/X"},"b":{"$ref":"#"}}}`))
+	if err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	if s.ID != "" {
+		tb.Errorf("ID=%q, want empty", s.ID)
+	}
+
+	if d, err := s.Validate([]byte(`{"a":5}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate ok: err=%v diag=%v", err, d)
+	}
+
+	if d, _ := s.Validate([]byte(`{"a":"x"}`)); len(d) == 0 {
+		tb.Errorf("validate bad: want invalid")
+	}
+}

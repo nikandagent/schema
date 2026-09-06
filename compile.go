@@ -90,7 +90,7 @@ func (s *Schema) AddDoc(uri string, doc *Schema) {
 		s.docs = map[string]*Schema{}
 	}
 
-	doc.id = uri
+	doc.ID = uri
 	doc.docs = s.docs
 	s.docs[uri] = doc
 }
@@ -100,15 +100,18 @@ func (s *Schema) AddDoc(uri string, doc *Schema) {
 // registry is created on demand once a Resolve hook is present.
 func (s *Schema) register() {
 	if s.docs == nil {
-		if s.Resolve == nil {
+		// A registry is worth its allocation for a document that can be reached
+		// by name — its own, or another one it may fetch. A document with
+		// neither only ever follows refs within itself.
+		if s.Resolve == nil && s.ID == "" {
 			return
 		}
 
 		s.docs = map[string]*Schema{}
 	}
 
-	if s.id != "" {
-		s.docs[s.id] = s
+	if s.ID != "" {
+		s.docs[s.ID] = s
 	}
 }
 
@@ -124,7 +127,7 @@ func (s *Schema) rootID() {
 		}
 
 		if string(s.prog.Reader().String(s.prog.code[ch.Off()])) == "$id" {
-			s.id = string(s.prog.Reader().String(s.prog.code[ch.Off()+1]))
+			s.ID = string(s.prog.Reader().String(s.prog.code[ch.Off()+1]))
 			return
 		}
 	}
@@ -897,12 +900,14 @@ func (s *Schema) loadDoc(handle string) (*Schema, error) {
 		return nil, serr(NoResolver, None, 0, 0, ErrRef)
 	}
 
-	body, err := s.Resolve(s.id, handle)
+	body, err := s.Resolve(s.ID, handle)
 	if err != nil {
 		return nil, err
 	}
 
-	t := &Schema{docs: s.docs, Resolve: s.Resolve}
+	// Name it before compiling: the handle is the retrieval URI, which is the
+	// base for its own refs unless its text overrides with a $id.
+	t := &Schema{ID: handle, docs: s.docs, Resolve: s.Resolve}
 
 	if err := t.Compile(body); err != nil {
 		return nil, err

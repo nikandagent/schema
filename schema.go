@@ -14,7 +14,11 @@ type (
 
 		defs []def
 
-		id   string             // this document's base URI ($id or registration key)
+		// ID is the document's base URI: where it was retrieved from, or the
+		// handle it is registered under. Set it before Compile for a document
+		// whose text does not name itself — a top-level $id replaces it.
+		ID string
+
 		docs map[string]*Schema // shared registry: base URI -> compiled document
 
 		// Resolve loads a document not already registered, on first $ref to it.
