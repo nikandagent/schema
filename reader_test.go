@@ -209,6 +209,130 @@ func TestBufferKeyword(tb *testing.T) {
 	mustPanic(tb, "Keyword(Type)", func() { b.Keyword(typ, Type) })
 }
 
+func TestBufferFind(tb *testing.T) {
+	s, err := Compile([]byte(`{"properties":{"a":{"type":"integer"},"b c":{"type":"string"},"":{"type":"null"},"café":{"type":"array"}},"patternProperties":{"^x":{"type":"boolean"}},"$defs":{"T":{"type":"number"},"a/b":{"type":"object"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	b := s.Reader()
+	props := b.Keyword(s.Root(), Properties)
+
+	for _, tc := range []struct {
+		block Opcode
+		key   string
+		want  Types
+	}{
+		{props, "a", TypeInteger},
+		{props, "b c", TypeString},
+		{props, "", TypeNull},
+		{props, "café", TypeArray},
+		{b.Keyword(s.Root(), PatternProps), "^x", TypeBoolean},
+		{b.Keyword(s.Root(), Defs), "T", TypeNumber},
+		{b.Keyword(s.Root(), Defs), "a/b", TypeObject},
+	} {
+		sub := b.Find(tc.block, tc.key)
+		if sub == None {
+			tb.Errorf("find %q: None", tc.key)
+			continue
+		}
+
+		if got := TypesOf(b.Keyword(sub, Type)); got != tc.want {
+			tb.Errorf("find %q: type %v, want %v", tc.key, got, tc.want)
+		}
+	}
+
+	for _, key := range []string{"z", "A", "b", "^y", " "} {
+		if v := b.Find(props, key); v != None {
+			tb.Errorf("find missing %q: got %v, want None", key, v)
+		}
+	}
+
+	e, err := Compile([]byte(`{"properties":{"caf\u00e9":{"type":"integer"}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	eb := e.Reader()
+
+	if v := eb.Find(eb.Keyword(e.Root(), Properties), "café"); v == None {
+		tb.Errorf("find escaped property name: None")
+	}
+
+	var buf Buffer
+
+	buf.Reset()
+
+	obj, err := buf.Writer().FromJSON([]byte(`{"a":1,"b c":2,"":3,"café":4,"esc\u0061":5}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := buf.Reader()
+
+	for _, tc := range []struct {
+		key  string
+		want string
+	}{
+		{"a", "1"},
+		{"b c", "2"},
+		{"", "3"},
+		{"café", "4"},
+		{"esca", "5"},
+	} {
+		v := r.Find(obj, tc.key)
+		if v == None {
+			tb.Errorf("find data %q: None", tc.key)
+			continue
+		}
+
+		if got := string(r.AppendJSON(nil, v)); got != tc.want {
+			tb.Errorf("find data %q: got %s, want %s", tc.key, got, tc.want)
+		}
+	}
+
+	for _, key := range []string{"z", "A", "b", "caf", "esc"} {
+		if v := r.Find(obj, key); v != None {
+			tb.Errorf("find missing data %q: got %v, want None", key, v)
+		}
+	}
+
+	esc, err := buf.Writer().FromJSON([]byte(`{"caf\u00e9":1}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if v := r.Find(esc, "café"); v == None {
+		tb.Errorf("find escaped data key: None")
+	}
+
+	dup, err := buf.Writer().FromJSON([]byte(`{"a":1,"a":2}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	// duplicate keys: first match wins
+	if got := string(r.AppendJSON(nil, r.Find(dup, "a"))); got != "1" {
+		tb.Errorf("find duplicate key: got %s, want 1", got)
+	}
+
+	mustPanic(tb, "Find(String)", func() { r.Find(r.Find(obj, "a"), "a") })
+	mustPanic(tb, "Find(All)", func() { b.Find(s.Root(), "a") })
+	mustPanic(tb, "Find(Type)", func() { b.Find(b.Keyword(s.Root(), Type), "a") })
+
+	x, err := Compile([]byte(`{"title":"t","x-type":"custom"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	xb := x.Reader()
+
+	for _, kw := range []Opcode{Raw, Ext} {
+		op := xb.Keyword(x.Root(), kw)
+		mustPanic(tb, "Find(pair keyword)", func() { xb.Find(op, "title") })
+	}
+}
+
 func TestBufferIter(tb *testing.T) {
 	s, err := Compile([]byte(`{"type":"string","properties":{"a":{},"b":{}},"allOf":[{},{},{}],"not":{},"additionalProperties":{"type":"integer"}}`))
 	if err != nil {

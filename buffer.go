@@ -530,6 +530,28 @@ func (b BufferReader) named(op, kind Opcode, key string) Opcode {
 	return None
 }
 
+// Find is the value under key in a pair-block: a data Object, or a schema
+// Properties, PatternProps or Defs. None when the key is not there — a value
+// node is never None, so the answer is unambiguous. Keys compare as bytes
+// because a string node holds the string, not its spelling.
+func (b BufferReader) Find(op Opcode, key string) Opcode {
+	switch op.Op() {
+	case Object, Properties, PatternProps, Defs:
+	default:
+		panic(op.Op())
+	}
+
+	off := op.OffInt()
+
+	for i := range op.ArgInt() {
+		if string(b.Span(b.code[off+2*i])) == key {
+			return b.code[off+2*i+1]
+		}
+	}
+
+	return None
+}
+
 // Iter ranges over the children of any node, pairing key with value — the
 // generalization of Nodes/NodesAt (pair- and list-blocks), Deref (single-child
 // pointers), and the variadic Additional. Pair-blocks yield (key, sub);
