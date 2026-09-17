@@ -346,3 +346,44 @@ func TestAtSkipsRequired(tb *testing.T) {
 		tb.Errorf("scoped: diags = %v, want none", found(doc, d))
 	}
 }
+
+// TestFrom is the behavior spec for the Walk From(op) option: the walk starts
+// at that node, and the document is the fragment it describes.
+func TestFrom(tb *testing.T) {
+	sc := mustCompile(tb, `{
+		"properties": {
+			"title": {"type":"string"},
+			"spec": {"oneOf": [
+				{"properties": {"kind": {"const":"a"}, "n": {"type":"integer"}}, "required": ["kind"]},
+				{"properties": {"kind": {"const":"b"}, "s": {"type":"string"}}, "required": ["kind"]}
+			]}
+		},
+		"required": ["title"]
+	}`)
+
+	r := sc.Reader()
+	spec := None
+
+	for k, v := range r.Iter(r.Keyword(sc.Root(), Properties)) {
+		if string(r.String(k)) == "spec" {
+			spec = v
+		}
+	}
+	if spec == None {
+		tb.Fatalf("spec is not a property")
+	}
+
+	run := func(name string, doc string, want ...string) {
+		d, err := sc.Walk([]byte(doc), nil, From(spec))
+		if err != nil {
+			tb.Errorf("%s: unexpected error: %v", name, err)
+			return
+		}
+		wantSet(tb, name, []byte(doc), d, want...)
+	}
+
+	// the fragment alone, the root's required title never asked for
+	run("a", `{"kind":"a","n":1}`)
+	run("b", `{"kind":"b","s":"x"}`)
+	run("neither", `{"kind":"a","n":"x"}`, "must match exactly one schema@"+`{"kind":"a","n":"x"}`)
+}

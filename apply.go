@@ -19,7 +19,8 @@ type (
 		spath []Opcode
 		dpath []Opcode
 
-		at []Opcode
+		at   []Opcode
+		from Opcode // the node the walk starts at, None for the root
 
 		opbuf [23]Opcode // spath[:8] | dpath[8:16] | at[16:23]; sized so Applier fills the 896 bucket
 		dbuf  [3]Diag
@@ -91,7 +92,12 @@ func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (_ Op
 		}
 	}
 
-	res, err := a.apply(s.root, root, h)
+	from := s.root
+	if a.from != None {
+		from = a.from
+	}
+
+	res, err := a.apply(from, root, h)
 	if errors.Is(err, ErrBreak) {
 		err = nil
 	}
@@ -986,6 +992,7 @@ func (a *Applier) reset(s *Schema, rewrite bool) *Applier {
 	}
 
 	a.rewrite = rewrite
+	a.from = None
 	a.diag = a.diag[:0]
 	a.spath = a.spath[:0]
 	a.dpath = a.dpath[:0]

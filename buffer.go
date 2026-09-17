@@ -459,7 +459,7 @@ func (b BufferReader) Nodes(op Opcode) []Opcode {
 	switch op.Op() {
 	case Object, Properties, PatternProps, Defs, Raw, Ext:
 		n *= 2 // pair-blocks: key + subschema per entry
-	case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+	case All, AllOf, AnyOf, OneOf, Prefix, Enum, Required, Array:
 		// list-blocks: one child per entry
 	default:
 		panic(op.Op())
@@ -486,7 +486,7 @@ func (b BufferReader) NodesAt(op Opcode, i int) (k, v Opcode) {
 		i *= 2 // kv-pairs
 
 		return b.code[off+i], b.code[off+i+1]
-	case All, AllOf, AnyOf, OneOf, Enum, Required, Array:
+	case All, AllOf, AnyOf, OneOf, Prefix, Enum, Required, Array:
 		return MakeInt(int64(i)), b.code[off+i]
 	default:
 		panic(op.Op())

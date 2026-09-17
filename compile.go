@@ -858,16 +858,25 @@ func (s *Schema) checkPatterns() error {
 	return nil
 }
 
-// RefTarget resolves a $ref node to its document and node: the same schema for
-// an internal "#frag", another document for "doc#frag". The doc part is an
-// opaque handle matched against the registry, then loaded via Resolve on a miss.
-// The returned document owns the node, so read it with that schema's Reader.
+// Lookup resolves a $ref string the way a $ref keyword would: "#frag" in this
+// document, "doc#frag" in a registered or Resolve-loaded one. The returned
+// document owns the node, so walk or read it through that document.
+func (s *Schema) Lookup(ref string) (*Schema, Opcode, error) {
+	return s.lookup(ref, None)
+}
+
+// RefTarget is Lookup of the pointer a $ref node holds, errors anchored at the
+// node.
 func (s *Schema) RefTarget(op Opcode) (*Schema, Opcode, error) {
 	if op.Op() != Ref {
 		panic(op.Op())
 	}
 
-	doc, frag := splitRef(s.refString(op))
+	return s.lookup(s.refString(op), op)
+}
+
+func (s *Schema) lookup(ref string, op Opcode) (*Schema, Opcode, error) {
+	doc, frag := splitRef(ref)
 
 	t := s
 
@@ -928,7 +937,8 @@ func splitRef(ref string) (doc, frag string) {
 }
 
 // fragTarget resolves a fragment within this document: "" or "#" is the root,
-// "#/$defs/x" and "#anchor" are entries in the defs table.
+// "#anchor" and "#/$defs/x" are entries in the defs table, any other "#/..." is
+// walked as a JSON Pointer over the program.
 func (s *Schema) fragTarget(frag string) Opcode {
 	if frag == "" || frag == "#" {
 		return s.root
@@ -940,7 +950,111 @@ func (s *Schema) fragTarget(frag string) Opcode {
 		}
 	}
 
+	if !strings.HasPrefix(frag, "#/") {
+		return None
+	}
+
+	return s.pointerTarget(frag[1:])
+}
+
+// pointerTarget walks a JSON Pointer over the program: a keyword name in a
+// schema object, a member name in a properties-like block, an index in a schema
+// list. A single-subschema keyword (items, not, if, ...) is stepped through so
+// the pointer reads as it does over the JSON. Only a schema position resolves.
+func (s *Schema) pointerTarget(p string) Opcode {
+	r := s.prog.Reader()
+	op := s.root
+
+	for p != "" {
+		var tok string
+		tok, p = pointerToken(p)
+
+		switch op.Op() {
+		case All:
+			op = s.keywordNamed(op, tok)
+		case Properties, PatternProps, Defs:
+			op = r.Find(op, tok)
+		case AllOf, AnyOf, OneOf, Prefix:
+			i, ok := pointerIndex(tok)
+			if !ok || i >= op.ArgInt() {
+				return None
+			}
+
+			op = r.Nodes(op)[i]
+		default:
+			return None
+		}
+
+		switch op.Op() {
+		case Items:
+			_, op = s.itemsParts(op)
+		case Additional:
+			_, _, op = s.additionalParts(op)
+		case If:
+			op, _, _ = s.condParts(op)
+		case Not, Then, Else:
+			op = r.Deref(op)
+		}
+	}
+
+	switch op.Op() {
+	case All, Pass, Fail:
+		return op
+	default:
+		return None
+	}
+}
+
+// keywordNamed is the keyword of schema node op spelled name, or None. Raw and
+// Ext hold literals, never a schema, so they are not looked up.
+func (s *Schema) keywordNamed(op Opcode, name string) Opcode {
+	for _, c := range s.prog.Reader().Nodes(op) {
+		if c.Op() != Raw && c.Op() != Ext && keywordName(c.Op()) == name {
+			return c
+		}
+	}
+
 	return None
+}
+
+// pointerToken splits the leading reference token off p ("/a/b" -> "a", "/b"),
+// decoding "~1" to '/' and then "~0" to '~' (RFC 6901 order).
+func pointerToken(p string) (tok, rest string) {
+	p = p[1:]
+
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		tok, rest = p[:i], p[i:]
+	} else {
+		tok = p
+	}
+
+	if strings.IndexByte(tok, '~') < 0 {
+		return tok, rest
+	}
+
+	tok = strings.ReplaceAll(tok, "~1", "/")
+	tok = strings.ReplaceAll(tok, "~0", "~")
+
+	return tok, rest
+}
+
+// pointerIndex reads an array index token: digits only, no leading zero.
+func pointerIndex(tok string) (int, bool) {
+	if tok == "" || len(tok) > 1 && tok[0] == '0' {
+		return 0, false
+	}
+
+	n := 0
+
+	for _, c := range []byte(tok) {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+
+		n = n*10 + int(c-'0')
+	}
+
+	return n, true
 }
 
 func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {

@@ -47,5 +47,15 @@ func At(p ...any) Option {
 	})
 }
 
+// From starts the walk at op instead of the root: the document is what that
+// node describes, a fragment of the whole.
+func From(op Opcode) Option {
+	return opt(func(a *Applier) error {
+		a.from = op
+
+		return nil
+	})
+}
+
 func (o use) apply(a *Applier) error { return nil }
 func (o opt) apply(a *Applier) error { return o(a) }
