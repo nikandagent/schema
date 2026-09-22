@@ -8,25 +8,29 @@ import (
 )
 
 type (
-	Error struct {
-		Diag Diag
-		Err  error
-	}
-
+	// Diag is one finding: Code says what went wrong, Op is the schema node it
+	// is about — the keyword, or the required entry — read through the owning
+	// document's Reader for the details (limit, types, name, ...), and Off/End
+	// locate the offending value in the source. Steps is the descent to the
+	// value, copied from Applier.Steps under SaveSteps, nil otherwise; its
+	// data keys live in the walk's data arena, so render it through the
+	// Applier that walked: a.Buffer.Reader().AppendPointer(w, d.Steps).
 	Diag struct {
 		Code     DiagCode
 		Op       Opcode
 		Off, End int
+		Steps    []Step
 	}
 
 	// DiagCode classifies a validation failure. The app switches on it and
 	// renders its own text; String gives the built-in default message.
 	DiagCode int
 
-	// Diagnostics carries validation diagnostics as an error, so a caller can return
-	// them through a plain error result and recover them higher up the stack with
-	// errors.As(err, &inv). Diagnostics are not errors on their own — Validate
-	// returns them alongside a nil error; wrap them in Diagnostics only to propagate.
+	// Diagnostics is a list of findings as an error. Validate returns findings as
+	// values next to a nil error; wrap them in Diagnostics to propagate them, and
+	// recover them higher up with AsDiag. Compile and the options return a
+	// one-element Diagnostics. errors.Is matches the category of the first
+	// finding (ErrKeyword, ErrRef, ...).
 	Diagnostics []Diag
 )
 
@@ -54,9 +58,8 @@ const (
 	MustNotMatch
 	MustMatchAny
 	MustMatchOne
+	MustMatchOnlyOne
 	Forbidden
-	InvalidObjectKey
-	InvalidArrayIndex
 
 	// compile-time codes
 	SchemaMustBeObject
@@ -76,7 +79,6 @@ const (
 	BadPattern
 	UnknownKeyword
 	UnsupportedKeyword
-	InvalidAtKey
 )
 
 // UserDiagBase is the first DiagCode reserved for application use. A Walk handler
@@ -85,30 +87,29 @@ const (
 const UserDiagBase DiagCode = 1 << 16
 
 var diagText = [...]string{
-	TypeMismatch:      "wrong type",
-	TooShort:          "too short",
-	TooLong:           "too long",
-	BelowMinimum:      "less than minimum",
-	AboveMaximum:      "greater than maximum",
-	BelowMinimumExcl:  "not above exclusive minimum",
-	AboveMaximumExcl:  "not below exclusive maximum",
-	NotMultipleOf:     "not a multiple",
-	TooFewItems:       "too few items",
-	TooManyItems:      "too many items",
-	DuplicateItems:    "duplicate items",
-	TooFewProps:       "too few properties",
-	TooManyProps:      "too many properties",
-	MissingRequired:   "missing required property",
-	MustMatchEnum:     "not in enum",
-	MustConst:         "not the const value",
-	PatternMismatch:   "does not match pattern",
-	FormatMismatch:    "does not match format",
-	MustNotMatch:      "matches a forbidden schema",
-	MustMatchAny:      "matches none of the schemas",
-	MustMatchOne:      "must match exactly one schema",
-	Forbidden:         "schema forbids any value",
-	InvalidObjectKey:  "object indexed as array",
-	InvalidArrayIndex: "array keyed as object",
+	TypeMismatch:     "wrong type",
+	TooShort:         "too short",
+	TooLong:          "too long",
+	BelowMinimum:     "less than minimum",
+	AboveMaximum:     "greater than maximum",
+	BelowMinimumExcl: "not above exclusive minimum",
+	AboveMaximumExcl: "not below exclusive maximum",
+	NotMultipleOf:    "not a multiple",
+	TooFewItems:      "too few items",
+	TooManyItems:     "too many items",
+	DuplicateItems:   "duplicate items",
+	TooFewProps:      "too few properties",
+	TooManyProps:     "too many properties",
+	MissingRequired:  "missing required property",
+	MustMatchEnum:    "not in enum",
+	MustConst:        "not the const value",
+	PatternMismatch:  "does not match pattern",
+	FormatMismatch:   "does not match format",
+	MustNotMatch:     "matches a forbidden schema",
+	MustMatchAny:     "matches none of the schemas",
+	MustMatchOne:     "matches none of the schemas",
+	MustMatchOnlyOne: "matches more than one schema",
+	Forbidden:        "schema forbids any value",
 
 	SchemaMustBeObject: "a schema must be an object or a boolean",
 	InvalidTypeShape:   `"type" must be a string or array of type names`,
@@ -127,7 +128,6 @@ var diagText = [...]string{
 	BadPattern:         "invalid regular expression",
 	UnknownKeyword:     "unknown keyword",
 	UnsupportedKeyword: "unsupported keyword",
-	InvalidAtKey:       "invalid At key",
 }
 
 func (c DiagCode) String() string {
@@ -152,19 +152,35 @@ var (
 	ErrNotInteger = errors.New("not an integer")
 )
 
-// Schema error categories. Each concrete failure is an *Error whose Err is one
-// of these, so errors.Is(err, ErrKeyword) still classifies it.
+// Error categories: what a Diagnostics error is, by the code of its first
+// finding; errors.Is(err, ErrKeyword) classifies it.
 var (
+	ErrInvalid        = errors.New("invalid document")
 	ErrKeyword        = errors.New("invalid keyword value")
 	ErrUnknownKeyword = errors.New("unknown keyword")
 	ErrUnsupported    = errors.New("unsupported keyword")
 	ErrPattern        = errors.New("invalid pattern")
 	ErrRef            = errors.New("unresolved ref")
-	ErrOption         = errors.New("invalid option")
 )
 
-func (e *Error) Error() string { return fmt.Sprintf("%v (%v)", e.Err, e.Diag.Code) }
-func (e *Error) Unwrap() error { return e.Err }
+// Category is the error a code classifies as.
+func (c DiagCode) Category() error {
+	switch c {
+	case SchemaMustBeObject, InvalidTypeShape, UnknownType, MustBeObject, MustBeArray, RequiredNotString,
+		MustBeNumber, MustBeInteger, MustBeBool, MustBeString, EmptyRef:
+		return ErrKeyword
+	case DuplicateAnchor, UnresolvedRef, NoResolver:
+		return ErrRef
+	case BadPattern:
+		return ErrPattern
+	case UnknownKeyword:
+		return ErrUnknownKeyword
+	case UnsupportedKeyword:
+		return ErrUnsupported
+	default:
+		return ErrInvalid
+	}
+}
 
 // FormatNicely appends the snippet(s) with a default context width.
 func (d Diag) FormatNicely(w, src []byte) []byte        { return d.FormatNicelyContext(w, src, 10, 10) }
@@ -253,12 +269,16 @@ func clampSpan(off, end, n int) (int, int) {
 func (e Diagnostics) Error() string {
 	switch len(e) {
 	case 0:
-		return "invalid document"
+		return ErrInvalid.Error()
 	case 1:
-		return "invalid document: " + e[0].Code.String()
+		return fmt.Sprintf("%v: %v", e[0].Code.Category(), e[0].Code)
 	default:
-		return fmt.Sprintf("invalid document: %s (+%d more)", e[0].Code.String(), len(e)-1)
+		return fmt.Sprintf("%v: %v (+%d more)", e[0].Code.Category(), e[0].Code, len(e)-1)
 	}
+}
+
+func (e Diagnostics) Is(target error) bool {
+	return len(e) != 0 && e[0].Code.Category() == target
 }
 
 // FormatNicelyContext appends each diagnostic's snippet (see
@@ -275,7 +295,7 @@ func (e Diagnostics) FormatNicelyContext(w, src []byte, before, after int) []byt
 	return w
 }
 
-// AsError wraps diags as an *Invalid, or returns a nil error when there are none,
+// AsError wraps diags as Diagnostics, or returns a nil error when there are none,
 // so propagating a validation result stays a one-liner.
 func AsError(diags []Diag) error {
 	if len(diags) == 0 {
@@ -285,8 +305,7 @@ func AsError(diags []Diag) error {
 	return Diagnostics(diags)
 }
 
-// AsDiag returns the diagnostics carried by an Invalid anywhere in err's chain,
-// or nil when err carries none.
+// AsDiag returns the diagnostics carried by err, or nil when it carries none.
 func AsDiag(err error) []Diag {
 	var inv Diagnostics
 	if errors.As(err, &inv) {
@@ -307,10 +326,8 @@ func normSyntax(err error) error {
 	return err
 }
 
-// serr builds a schema Error: a diagnostic (the classifying code, the offending
-// keyword op — None if none — and its span in the schema source, off plus length
-// n stored as a half-open Off/End) and a category sentinel. Specifics beyond the
-// code are recovered from op and the span, or carried in kind.
-func serr(code DiagCode, op Opcode, off, n int, kind error) *Error {
-	return &Error{Diag: Diag{Code: code, Op: op.Op(), Off: off, End: off + n}, Err: kind}
+// serr is a schema-side failure: one finding at the offending keyword op (None
+// if none) and its span in the schema source, off plus length n.
+func serr(code DiagCode, op Opcode, off, n int) error {
+	return Diagnostics{{Code: code, Op: op, Off: off, End: off + n}}
 }

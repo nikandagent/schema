@@ -20,6 +20,22 @@ func (s *Schema) FormatNode(w []byte, op Opcode) []byte {
 	return s.format(w, op)
 }
 
+// FormatKeyword renders a keyword node's value as schema JSON: the operand a
+// Diag.Op stands for (3 for minLength, ["integer","null"] for type, the name
+// for a required entry, the subschema for additionalProperties).
+func (s *Schema) FormatKeyword(w []byte, op Opcode) []byte {
+	switch op.Op() {
+	case String, Key:
+		return s.lit(w, op)
+	case Raw, Ext:
+		return s.lit(w, s.prog.code[op.Off()+1])
+	case Pass, Fail:
+		return s.format(w, op)
+	default:
+		return s.constraint(w, op)
+	}
+}
+
 // appendRef writes a ref pointer, collapsing the legacy definitions prefix.
 // appendRef emits a $ref pointer, rewriting the legacy $defs location on the way
 // out. The pointer is a string like any other, so it is encoded, not appended.
@@ -75,7 +91,7 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 			}
 
 			w = append(w, '"')
-			w = append(w, keywordName(c.Op())...)
+			w = append(w, c.Keyword()...)
 			w = append(w, '"', ':')
 			w = s.constraint(w, c)
 		}
@@ -219,8 +235,10 @@ func (s *Schema) formatType(w []byte, mask Types) []byte {
 	return w
 }
 
-func keywordName(op Opcode) string {
-	switch op {
+// Keyword is the schema keyword a node stands for, "" for a node that is not a
+// keyword (a value, a required entry, a bare schema).
+func (op Opcode) Keyword() string {
+	switch op.Op() {
 	case Type:
 		return "type"
 	case Properties:
@@ -288,6 +306,6 @@ func keywordName(op Opcode) string {
 	case Ref:
 		return "$ref"
 	default:
-		panic(op.Op())
+		return ""
 	}
 }

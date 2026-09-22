@@ -28,9 +28,7 @@ type (
 
 		patterns map[Opcode]*regexp.Regexp // pattern node -> compiled regex, filled at compile
 
-		c Applier
-
-		defsbuf [3]def // absorbs the slack the Applier trim opens, keeping Schema near its 1536 bucket
+		defsbuf [8]def // inline room for a small $defs table, filling the 768 bucket
 	}
 
 	// Opcode is a schema instruction.
@@ -55,6 +53,7 @@ const (
 	KeepMissing                               // keep missing properties absent, don't fill defaults
 	AssertStringFormat                        // check "format" instead of carrying it as an annotation
 	AssertEmailUseful                         // judge "email" as people write them: no quoted local part, no address literal
+	SaveSteps                                 // copy the descent into each Diag.Steps
 )
 
 // DataPreserve rewrites data without changing its content: no reordering and no
@@ -103,33 +102,20 @@ const (
 )
 
 const (
-	imm Opcode = iota << shapeShift
+	scalar = iota << shapeShift
 	span
+	imm
+	ref
 	block
-
-	span2 = span + 1<<(shapeShift-1) // second half of span
 )
 
 const (
-	Pass Opcode = imm | iota
+	None Opcode = scalar | iota
+	Pass
 	Fail
-	Type
-	Unique
-	MinLen
-	MaxLen
-	MinItems
-	MaxItems
-	MinProps
-	MaxProps
-	Format
-	Canon
-
-	None
-	IntLit
-	FltLit
-	SrcOff
-	SrcSpan
-	Each
+	Null
+	False
+	True
 )
 
 const (
@@ -142,9 +128,34 @@ const (
 )
 
 const (
-	Null Opcode = span2 | iota
-	False
-	True
+	Type Opcode = imm | iota
+	Unique
+	MinLen
+	MaxLen
+	MinItems
+	MaxItems
+	MinProps
+	MaxProps
+	Format
+	Canon
+
+	IntLit
+	FltLit
+	SrcOff
+	SrcSpan
+)
+
+const (
+	Not Opcode = ref | iota
+	Const
+	Default
+
+	Raw
+	Ext // custom "x-" keyword: an inert Raw-like pair, acted on only in a Walk handler
+
+	If
+	Then
+	Else
 )
 
 const (
@@ -154,28 +165,20 @@ const (
 	OneOf
 	Enum
 	Required
-	Array
-	Not
 	Prefix
 	Items
 	Additional
-	Const
-	Default
 	Minimum
 	Maximum
 	ExclMin
 	ExclMax
 	MultipleOf
-	Object
 	Properties
 	PatternProps
 	Defs
-	Raw
-	Ext // custom "x-" keyword: an inert Raw-like pair, acted on only in a Walk handler
 
-	If
-	Then
-	Else
+	Array
+	Object
 )
 
 const (

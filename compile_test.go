@@ -39,17 +39,17 @@ func TestKeywordTypeErrors(tb *testing.T) {
 			continue
 		}
 
-		var e *Error
-		if !errors.As(err, &e) {
-			tb.Errorf("compile %q: err %v (%T) is not *Error", tc.in, err, err)
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Errorf("compile %q: err %v (%T) is not a one-element Diagnostics", tc.in, err, err)
 			continue
 		}
 
 		if !errors.Is(err, ErrKeyword) {
 			tb.Errorf("compile %q: err %v, want Is(ErrKeyword)", tc.in, err)
 		}
-		if e.Diag.Code != tc.code {
-			tb.Errorf("compile %q: Code %v, want %v", tc.in, e.Diag.Code, tc.code)
+		if d[0].Code != tc.code {
+			tb.Errorf("compile %q: Code %v, want %v", tc.in, d[0].Code, tc.code)
 		}
 	}
 }
@@ -86,24 +86,27 @@ func TestPath(tb *testing.T) {
 		return &s
 	}
 
-	// 1. Root depth 0: the root's Required node sees empty paths.
+	// 1. Root: nothing entered, nothing descended.
 	{
 		sc := compile(`{"type":"object","required":["a"]}`)
 
 		seen := false
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Required {
 				seen = true
-				if len(c.DataPath()) != 0 || len(c.SchemaPath()) != 0 {
-					tb.Errorf("root Required: DataPath=%d SchemaPath=%d, want 0 0",
-						len(c.DataPath()), len(c.SchemaPath()))
+
+				if c.Depth != 0 || len(c.Steps) != 0 {
+					tb.Errorf("root Required: Depth=%d Steps=%d, want 0 0", c.Depth, len(c.Steps))
+				}
+				if got := string(c.Buffer.Reader().AppendPointer(nil, c.Steps)); got != "." {
+					tb.Errorf("root Required: pointer %q, want %q", got, ".")
 				}
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`{}`), h); err != nil {
+		if _, err := walk(sc, []byte(`{}`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if !seen {
@@ -111,32 +114,37 @@ func TestPath(tb *testing.T) {
 		}
 	}
 
-	// 2. Object key step: one Str step decoding to the property name.
+	// 2. Object key step: entered through Properties, named and keyed by the property.
 	{
 		sc := compile(`{"properties":{"a":{"type":"string"}}}`)
 
 		seen := false
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				seen = true
 
-				dp := c.DataPath()
-				if len(dp) != 1 || len(c.SchemaPath()) != 1 {
-					tb.Fatalf("prop Type: DataPath=%d SchemaPath=%d, want 1 1",
-						len(dp), len(c.SchemaPath()))
+				if c.Depth != 1 || len(c.Steps) != 1 {
+					tb.Fatalf("prop Type: Depth=%d Steps=%d, want 1 1", c.Depth, len(c.Steps))
 				}
-				if dp[0].Op() != String {
-					tb.Errorf("prop step Op=%v, want Str", dp[0].Op())
+
+				r := c.Buffer.Reader()
+				st := c.Steps[0]
+
+				if st.Op.Op() != Properties || st.Sub.Op() != All || st.Doc != sc {
+					tb.Errorf("prop step: Op=%v Sub=%v samedoc=%v, want Properties All true", st.Op.Op(), st.Sub.Op(), st.Doc == sc)
 				}
-				if got := string(c.Buffer().Reader().String(dp[0])); got != "a" {
-					tb.Errorf("prop step key %q, want %q", got, "a")
+				if st.DataKey.Op() != String || string(r.String(st.DataKey)) != "a" {
+					tb.Errorf("prop step DataKey=%v %q, want String %q", st.DataKey.Op(), r.String(st.DataKey), "a")
+				}
+				if got := string(r.AppendPointer(nil, c.Steps)); got != ".a" {
+					tb.Errorf("prop pointer %q, want %q", got, ".a")
 				}
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`{"a":"x"}`), h); err != nil {
+		if _, err := walk(sc, []byte(`{"a":"x"}`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if !seen {
@@ -144,29 +152,28 @@ func TestPath(tb *testing.T) {
 		}
 	}
 
-	// 3. Array index step: one IntLit step, index 0,1,2 across the elements.
+	// 3. Array index step: one IntLit key, index 0,1,2 across the elements.
 	{
 		sc := compile(`{"items":{"type":"number"}}`)
 
-		var idx []int
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		var ptr []string
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
-				dp := c.DataPath()
-				if len(dp) != 1 || dp[0].Op() != IntLit {
-					tb.Fatalf("item Type: DataPath=%d step=%v, want 1 IntLit",
-						len(dp), dp[0].Op())
+				if c.Depth != 1 || c.Steps[0].DataKey.Op() != IntLit {
+					tb.Fatalf("item Type: Depth=%d key=%v, want 1 IntLit", c.Depth, c.Steps[0].DataKey.Op())
 				}
-				idx = append(idx, dp[0].ImmInt())
+
+				ptr = append(ptr, string(c.Buffer.Reader().AppendPointer(nil, c.Steps)))
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`[10,20,30]`), h); err != nil {
+		if _, err := walk(sc, []byte(`[10,20,30]`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
-		if len(idx) != 3 || idx[0] != 0 || idx[1] != 1 || idx[2] != 2 {
-			tb.Errorf("item indices %v, want [0 1 2]", idx)
+		if len(ptr) != 3 || ptr[0] != "[0]" || ptr[1] != "[1]" || ptr[2] != "[2]" {
+			tb.Errorf("item pointers %v, want [0] [1] [2]", ptr)
 		}
 	}
 
@@ -175,29 +182,22 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"items":{"items":{"properties":{"deep":{"type":"string"}}}}}}`)
 
 		seen := false
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
 				seen = true
 
-				dp := c.DataPath()
-				if len(dp) != 3 {
-					tb.Fatalf("deep Type: DataPath=%d, want 3", len(dp))
+				if c.Depth != 3 {
+					tb.Fatalf("deep Type: Depth=%d, want 3", c.Depth)
 				}
-				if dp[0].Op() != String || string(c.Buffer().Reader().String(dp[0])) != "items" {
-					tb.Errorf("step0 %v %q, want Str %q", dp[0].Op(), c.Buffer().Reader().String(dp[0]), "items")
-				}
-				if dp[1].Op() != IntLit || dp[1].ImmInt() != 0 {
-					tb.Errorf("step1 %v %d, want IntLit 0", dp[1].Op(), dp[1].ImmInt())
-				}
-				if dp[2].Op() != String || string(c.Buffer().Reader().String(dp[2])) != "deep" {
-					tb.Errorf("step2 %v %q, want Str %q", dp[2].Op(), c.Buffer().Reader().String(dp[2]), "deep")
+				if got := string(c.Buffer.Reader().AppendPointer(nil, c.Steps)); got != ".items[0].deep" {
+					tb.Errorf("deep pointer %q, want %q", got, ".items[0].deep")
 				}
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`{"items":[{"deep":"y"}]}`), h); err != nil {
+		if _, err := walk(sc, []byte(`{"items":[{"deep":"y"}]}`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if !seen {
@@ -205,23 +205,30 @@ func TestPath(tb *testing.T) {
 		}
 	}
 
-	// 5. allOf does not add depth: the branch's Required stays at depth 0.
+	// 5. allOf is a step the data does not follow: Steps grows, Depth does not.
 	{
 		sc := compile(`{"allOf":[{"required":["a"]}]}`)
 
 		seen := false
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Required {
 				seen = true
-				if len(c.DataPath()) != 0 {
-					tb.Errorf("allOf Required: DataPath=%d, want 0", len(c.DataPath()))
+
+				if c.Depth != 0 || len(c.Steps) != 1 {
+					tb.Errorf("allOf Required: Depth=%d Steps=%d, want 0 1", c.Depth, len(c.Steps))
+				}
+				if st := c.Steps[0]; st.Op.Op() != AllOf || st.DataKey != None {
+					tb.Errorf("allOf step: Op=%v DataKey=%v, want AllOf None", st.Op.Op(), st.DataKey)
+				}
+				if got := string(c.Buffer.Reader().AppendPointer(nil, c.Steps)); got != "." {
+					tb.Errorf("allOf pointer %q, want %q", got, ".")
 				}
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`{}`), h); err != nil {
+		if _, err := walk(sc, []byte(`{}`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if !seen {
@@ -234,15 +241,15 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`)
 
 		var depths []int
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 			if op.Op() == Type {
-				depths = append(depths, len(c.DataPath()))
+				depths = append(depths, c.Depth)
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		if _, err := sc.Walk([]byte(`{"a":"x","b":"y"}`), h); err != nil {
+		if _, err := walk(sc, []byte(`{"a":"x","b":"y"}`), h); err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if len(depths) != 2 || depths[0] != 1 || depths[1] != 1 {
@@ -254,23 +261,23 @@ func TestPath(tb *testing.T) {
 	{
 		sc := compile(`{"required":["x"],"properties":{"obj":{"required":["y"]}}}`)
 
-		h := func(c *Applier, op, val Opcode, h Handler) (Opcode, error) {
-			if op.Op() == Required && len(c.DataPath()) == 0 {
+		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+			if op.Op() == Required && c.Depth == 0 {
 				return val, nil
 			}
 
-			return c.Apply(op, val, h)
+			return c.Apply(s, op, val, h)
 		}
 
-		diag, err := sc.Walk([]byte(`{"obj":{}}`), h)
+		diag, err := walk(sc, []byte(`{"obj":{}}`), h)
 		if err != nil {
 			tb.Fatalf("walk: %v", err)
 		}
 		if len(diag) != 1 {
 			tb.Fatalf("diag count %d, want 1: %+v", len(diag), diag)
 		}
-		if diag[0].Op != Required {
-			tb.Errorf("remaining diag Op=%v, want Required", diag[0].Op)
+		if diag[0].Code != MissingRequired {
+			tb.Errorf("remaining diag Code=%v, want %v", diag[0].Code, MissingRequired)
 		}
 	}
 }
@@ -282,7 +289,7 @@ func TestDiagSpan(tb *testing.T) {
 			tb.Fatalf("compile %q: %v", src, err)
 		}
 
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate %q: %v", data, err)
 		}
@@ -355,7 +362,7 @@ func TestDiagSpan(tb *testing.T) {
 		}
 
 		data := `[{},{"y":1}]`
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate: %v", err)
 		}
@@ -383,7 +390,7 @@ func TestDiagSpanExtra(tb *testing.T) {
 		}
 
 		data := `{"a":null,"b":true}`
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate: %v", err)
 		}
@@ -412,7 +419,7 @@ func TestDiagSpanExtra(tb *testing.T) {
 		}
 
 		data := `{"o":{"a":1,"b":2}}`
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate: %v", err)
 		}

@@ -169,3 +169,133 @@ func TestFormatKeepOrder(tb *testing.T) {
 		}
 	}
 }
+
+func TestFormatKeyword(tb *testing.T) {
+	s, err := Compile([]byte(`{
+		"type":["integer","null"],"properties":{"a":{"type":"string"}},"$defs":{"T":{}},"patternProperties":{"^x":{}},
+		"required":["a","b"],"enum":[1,"x"],"const":{"k":1},"default":[1],
+		"minimum":1,"maximum":2.5,"exclusiveMinimum":0,"exclusiveMaximum":3,"multipleOf":2,
+		"items":{"type":"number"},"prefixItems":[{"type":"string"}],"additionalProperties":false,"not":{"type":"null"},
+		"if":{"type":"string"},"then":{"minLength":1},"else":{"maxLength":9},"allOf":[{}],"anyOf":[{}],"oneOf":[{}],
+		"minLength":1,"maxLength":2,"minItems":3,"maxItems":4,"minProperties":5,"maxProperties":6,"uniqueItems":true,
+		"pattern":"^a$","format":"uuid","$ref":"#/$defs/T","title":"t","x-ext":{"q":[1]}
+	}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := s.Reader()
+
+	want := map[string]string{
+		"type":                 `["null","integer"]`,
+		"properties":           `{"a":{"type":"string"}}`,
+		"$defs":                `{"T":{}}`,
+		"patternProperties":    `{"^x":{}}`,
+		"required":             `["a","b"]`,
+		"enum":                 `[1,"x"]`,
+		"const":                `{"k":1}`,
+		"default":              `[1]`,
+		"minimum":              `1`,
+		"maximum":              `2.5`,
+		"exclusiveMinimum":     `0`,
+		"exclusiveMaximum":     `3`,
+		"multipleOf":           `2`,
+		"items":                `{"type":"number"}`,
+		"prefixItems":          `[{"type":"string"}]`,
+		"additionalProperties": `false`,
+		"not":                  `{"type":"null"}`,
+		"if":                   `{"type":"string"}`,
+		"then":                 `{"minLength":1}`,
+		"else":                 `{"maxLength":9}`,
+		"allOf":                `[{}]`,
+		"anyOf":                `[{}]`,
+		"oneOf":                `[{}]`,
+		"minLength":            `1`,
+		"maxLength":            `2`,
+		"minItems":             `3`,
+		"maxItems":             `4`,
+		"minProperties":        `5`,
+		"maxProperties":        `6`,
+		"uniqueItems":          `true`,
+		"pattern":              `"^a$"`,
+		"format":               `"uuid"`,
+		"$ref":                 `"#/$defs/T"`,
+	}
+
+	seen := map[string]bool{}
+
+	for _, op := range r.Nodes(s.Root()) {
+		if op.Op() == Raw || op.Op() == Ext {
+			continue
+		}
+
+		name := op.Keyword()
+		seen[name] = true
+
+		if got := string(s.FormatKeyword(nil, op)); got != want[name] {
+			tb.Errorf("%s: got %s, want %s", name, got, want[name])
+		}
+	}
+
+	for name := range want {
+		if !seen[name] {
+			tb.Errorf("%s: never seen", name)
+		}
+	}
+
+	if got := string(s.FormatKeyword(nil, r.Keyword(s.Root(), Raw))); got != `"t"` {
+		tb.Errorf("title: got %s", got)
+	}
+
+	if got := string(s.FormatKeyword(nil, r.Keyword(s.Root(), Ext))); got != `{"q":[1]}` {
+		tb.Errorf("x-ext: got %s", got)
+	}
+
+	if got := string(s.FormatKeyword(nil, Fail)); got != `false` {
+		tb.Errorf("Fail: got %s", got)
+	}
+}
+
+func TestKeywordEntry(tb *testing.T) {
+	s, err := Compile([]byte(`{"required":["a"]}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := s.Reader()
+	_, entry := r.NodesAt(r.Keyword(s.Root(), Required), 0)
+
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				tb.Errorf("FormatKeyword(required entry): panic %v, want the name", p)
+			}
+		}()
+
+		if got := string(s.FormatKeyword(nil, entry)); got != `"a"` {
+			tb.Errorf("FormatKeyword(required entry): got %s, want %q", got, `"a"`)
+		}
+	}()
+
+	for _, tc := range []struct {
+		name string
+		op   Opcode
+	}{
+		{"required entry", entry},
+		{"Pass", Pass},
+		{"Fail", Fail},
+		{"None", None},
+	} {
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					tb.Errorf("Keyword(%s): panic %v, want \"\"", tc.name, p)
+				}
+			}()
+
+			if got := tc.op.Keyword(); got != "" {
+				tb.Errorf("Keyword(%s): got %q, want \"\"", tc.name, got)
+			}
+		}()
+	}
+}

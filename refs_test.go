@@ -20,7 +20,7 @@ func TestAnchor(tb *testing.T) {
 		{`{"b":"x"}`, false},
 		{`{"a":"x"}`, false}, // anchored subschema still applies in place
 	} {
-		d, err := s.Validate([]byte(tc.data))
+		d, err := validate(s, []byte(tc.data))
 		if err != nil {
 			tb.Errorf("validate %s: unexpected error: %v", tc.data, err)
 			continue
@@ -46,11 +46,11 @@ func TestDefsResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+	if d, err := validate(s, []byte(`"x"`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate string: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`5`)); len(d) == 0 {
+	if d, _ := validate(s, []byte(`5`)); len(d) == 0 {
 		tb.Errorf("validate number: want invalid")
 	}
 }
@@ -62,11 +62,11 @@ func TestDefsMerge(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`{"a":"x","b":1}`)); err != nil || len(d) != 0 {
+	if d, err := validate(s, []byte(`{"a":"x","b":1}`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate ok-case: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"a":1,"b":1}`)); len(d) == 0 {
+	if d, _ := validate(s, []byte(`{"a":1,"b":1}`)); len(d) == 0 {
 		tb.Errorf("validate bad A: want invalid")
 	}
 
@@ -98,11 +98,11 @@ func TestExternalAddDoc(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
+	if d, err := validate(&s, []byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"id":5}`)); len(d) == 0 {
+	if d, _ := validate(&s, []byte(`{"id":5}`)); len(d) == 0 {
 		tb.Errorf("validate bad: want invalid")
 	}
 
@@ -119,11 +119,11 @@ func TestExternalAddDoc(tb *testing.T) {
 		tb.Fatalf("compile whole-doc: %v", err)
 	}
 
-	if d, err := w.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+	if d, err := validate(&w, []byte(`"x"`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate whole-doc ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := w.Validate([]byte(`5`)); len(d) == 0 {
+	if d, _ := validate(&w, []byte(`5`)); len(d) == 0 {
 		tb.Errorf("validate whole-doc bad: want invalid")
 	}
 
@@ -148,11 +148,11 @@ func TestLazyResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
+	if d, err := validate(&s, []byte(`{"id":"x"}`)); err != nil || len(d) != 0 {
 		tb.Errorf("lazy validate ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"id":5}`)); len(d) == 0 {
+	if d, _ := validate(&s, []byte(`{"id":5}`)); len(d) == 0 {
 		tb.Errorf("lazy validate bad: want invalid")
 	}
 }
@@ -177,11 +177,11 @@ func TestMutualResolve(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`{"b":{"flag":true,"a":{"b":{}}}}`)); err != nil || len(d) != 0 {
+	if d, err := validate(&s, []byte(`{"b":{"flag":true,"a":{"b":{}}}}`)); err != nil || len(d) != 0 {
 		tb.Errorf("mutual ok (terminates one hop): err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"b":{"flag":1}}`)); len(d) == 0 {
+	if d, _ := validate(&s, []byte(`{"b":{"flag":1}}`)); len(d) == 0 {
 		tb.Errorf("mutual bad (flag not boolean): want invalid")
 	}
 }
@@ -333,7 +333,7 @@ func TestResolveError(tb *testing.T) {
 		tb.Fatalf("compile (resolve deferred to apply): %v", err)
 	}
 
-	_, err := s.Validate([]byte(`{}`))
+	_, err := validate(&s, []byte(`{}`))
 	if !errors.Is(err, myErr) {
 		tb.Errorf("resolve error: got %v, want %v", err, myErr)
 	}
@@ -361,11 +361,11 @@ func TestResolveTransitive(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	if d, err := s.Validate([]byte(`{"b":{"c":5}}`)); err != nil || len(d) != 0 {
+	if d, err := validate(&s, []byte(`{"b":{"c":5}}`)); err != nil || len(d) != 0 {
 		tb.Fatalf("validate ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"b":{"c":"x"}}`)); len(d) == 0 {
+	if d, _ := validate(&s, []byte(`{"b":{"c":"x"}}`)); len(d) == 0 {
 		tb.Errorf("validate bad: want invalid")
 	}
 
@@ -407,7 +407,7 @@ func TestIDBase(tb *testing.T) {
 			tb.Errorf("compile %q with ID %q: ID=%q, want %q", tc.text, tc.id, s.ID, tc.want)
 		}
 
-		if d, err := s.Validate([]byte(`"x"`)); err != nil || len(d) != 0 {
+		if d, err := validate(&s, []byte(`"x"`)); err != nil || len(d) != 0 {
 			tb.Errorf("validate %q: err=%v diag=%v", tc.text, err, d)
 			continue
 		}
@@ -443,11 +443,11 @@ func TestIDSelfRegistered(tb *testing.T) {
 			continue
 		}
 
-		if d, err := s.Validate([]byte(`{"a":5}`)); err != nil || len(d) != 0 {
+		if d, err := validate(&s, []byte(`{"a":5}`)); err != nil || len(d) != 0 {
 			tb.Errorf("validate ok %q: err=%v diag=%v", tc.text, err, d)
 		}
 
-		if d, _ := s.Validate([]byte(`{"a":"x"}`)); len(d) == 0 {
+		if d, _ := validate(&s, []byte(`{"a":"x"}`)); len(d) == 0 {
 			tb.Errorf("validate bad %q: want invalid", tc.text)
 		}
 	}
@@ -477,11 +477,11 @@ func TestNoIDInternalRefs(tb *testing.T) {
 		tb.Errorf("ID=%q, want empty", s.ID)
 	}
 
-	if d, err := s.Validate([]byte(`{"a":5}`)); err != nil || len(d) != 0 {
+	if d, err := validate(s, []byte(`{"a":5}`)); err != nil || len(d) != 0 {
 		tb.Errorf("validate ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := s.Validate([]byte(`{"a":"x"}`)); len(d) == 0 {
+	if d, _ := validate(s, []byte(`{"a":"x"}`)); len(d) == 0 {
 		tb.Errorf("validate bad: want invalid")
 	}
 }

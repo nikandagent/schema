@@ -128,14 +128,14 @@ func TestLookupNotFound(tb *testing.T) {
 			tb.Errorf("lookup %q: err %v, want Is(ErrRef)", ref, err)
 		}
 
-		var e *Error
-		if !errors.As(err, &e) {
-			tb.Errorf("lookup %q: err %v (%T) is not *Error", ref, err, err)
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Errorf("lookup %q: err %v (%T) is not a one-element Diagnostics", ref, err, err)
 			continue
 		}
 
-		if e.Diag.Code != UnresolvedRef && e.Diag.Code != NoResolver || e.Diag.Off != 0 || e.Diag.End != 0 {
-			tb.Errorf("lookup %q: diag %+v, want UnresolvedRef at 0:0", ref, e.Diag)
+		if d[0].Code != UnresolvedRef && d[0].Code != NoResolver || d[0].Off != 0 || d[0].End != 0 {
+			tb.Errorf("lookup %q: diag %+v, want UnresolvedRef at 0:0", ref, d[0])
 		}
 
 		if node != None {
@@ -157,6 +157,8 @@ func TestLookupExternal(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
+	var a Applier
+
 	t, node, err := s.Lookup("urn:x#/properties/a")
 	if err != nil {
 		tb.Fatalf("lookup: %v", err)
@@ -170,11 +172,11 @@ func TestLookupExternal(tb *testing.T) {
 		tb.Errorf("lookup: got %s", got)
 	}
 
-	if d, err := t.Validate([]byte(`"ok"`), From(node)); err != nil || len(d) != 0 {
+	if d, err := a.Walk(t, node, []byte(`"ok"`), nil); err != nil || len(d) != 0 {
 		tb.Errorf("validate from ok: err=%v diag=%v", err, d)
 	}
 
-	if d, _ := t.Validate([]byte(`5`), From(node)); len(d) == 0 {
+	if d, _ := a.Walk(t, node, []byte(`5`), nil); len(d) == 0 {
 		tb.Errorf("validate from bad: want invalid")
 	}
 
@@ -236,7 +238,7 @@ func TestRefPointer(tb *testing.T) {
 			continue
 		}
 
-		d, err := s.Validate([]byte(tc.data))
+		d, err := validate(s, []byte(tc.data))
 		if err != nil {
 			tb.Errorf("validate %q: %v", tc.data, err)
 			continue
@@ -280,13 +282,15 @@ func TestValidateFrom(tb *testing.T) {
 		{"#/properties/user/properties/n", `5`, true},
 		{"#/properties/user/properties/n", `1`, false},
 	} {
+		var a Applier
+
 		t, node, err := s.Lookup(tc.ref)
 		if err != nil {
 			tb.Errorf("lookup %q: %v", tc.ref, err)
 			continue
 		}
 
-		d, err := t.Validate([]byte(tc.data), From(node))
+		d, err := a.Walk(t, node, []byte(tc.data), nil)
 		if err != nil {
 			tb.Errorf("validate %q from %q: %v", tc.data, tc.ref, err)
 			continue

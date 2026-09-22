@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// TestUse covers the Use option: a caller-supplied Applier used in place of the
-// shared s.c, so the same *Schema can be walked concurrently. It also guards the
-// reset: a reused Applier must start clean each call (walk resets whichever
-// Applier it walks, not only the default one).
+// TestUse covers reusing one Applier across calls: it must start clean each
+// time, and carry the rewrite flag only for the call that asked for it.
 func TestUse(tb *testing.T) {
 	s, err := Compile([]byte(`{"properties":{"a":{"type":"string"}}}`))
 	if err != nil {
@@ -19,18 +17,24 @@ func TestUse(tb *testing.T) {
 
 	// invalid then valid through the same Applier: the second call must not
 	// carry the first call's diagnostic.
-	if d, err := s.Validate([]byte(`{"a":1}`), Use(&a)); err != nil || len(d) != 1 {
+	if d, err := a.Validate(s, []byte(`{"a":1}`)); err != nil || len(d) != 1 {
 		tb.Fatalf("invalid: diag=%d err=%v, want 1/nil", len(d), err)
 	}
-	if d, err := s.Validate([]byte(`{"a":"ok"}`), Use(&a)); err != nil || len(d) != 0 {
+	if d, err := a.Validate(s, []byte(`{"a":"ok"}`)); err != nil || len(d) != 0 {
 		tb.Fatalf("valid after reuse: diag=%d err=%v, want 0/nil (reset leaked)", len(d), err)
 	}
 
-	// rewrite through Use must actually rewrite (proves the rewrite flag is set
-	// on the provided Applier, not just the default).
-	out, _, err := s.WalkRewrite(nil, []byte(`{ "a" : "x" }`), nil, Use(&a))
+	out, _, err := a.Rewrite(s, None, []byte(`{ "a" : "x" }`), nil, nil)
 	if err != nil || string(out) != `{"a":"x"}` {
-		tb.Fatalf("rewrite through Use: out=%q err=%v", out, err)
+		tb.Fatalf("rewrite: out=%q err=%v", out, err)
+	}
+
+	if !a.Rewriting() {
+		tb.Errorf("Rewriting() after a rewrite: false")
+	}
+
+	if d, err := a.Validate(s, []byte(`{"a":"ok"}`)); err != nil || len(d) != 0 || a.Rewriting() {
+		tb.Errorf("validate after a rewrite: diag=%d err=%v rewriting=%v", len(d), err, a.Rewriting())
 	}
 }
 
@@ -58,7 +62,7 @@ func TestUseParallel(tb *testing.T) {
 			for i := range 300 {
 				k := i % 2
 
-				d, err := s.Validate([]byte(docs[k]), Use(&a))
+				d, err := a.Validate(s, []byte(docs[k]))
 				if err != nil {
 					tb.Errorf("g%d: %v", g, err)
 					return

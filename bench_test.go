@@ -36,11 +36,13 @@ func BenchmarkValidate(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	var a Applier
+
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for range b.N {
-		d, err := s.Validate(benchDoc)
+		d, err := a.Validate(&s, benchDoc)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -56,6 +58,7 @@ func BenchmarkRewrite(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	var a Applier
 	var w []byte
 
 	b.ReportAllocs()
@@ -63,7 +66,7 @@ func BenchmarkRewrite(b *testing.B) {
 
 	for range b.N {
 		var err error
-		w, _, err = s.Rewrite(w[:0], benchDoc)
+		w, _, err = a.Rewrite(&s, None, benchDoc, w[:0], nil)
 		if err != nil {
 			b.Fatal(err)
 		}

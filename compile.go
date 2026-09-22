@@ -2,7 +2,6 @@ package schema
 
 import (
 	"bytes"
-	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -153,7 +152,7 @@ func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
 		i, err = d.Skip(b, i)
 		return op, i, err
 	default:
-		return 0, i, serr(SchemaMustBeObject, None, i, 0, ErrKeyword)
+		return 0, i, serr(SchemaMustBeObject, None, i, 0)
 	}
 }
 
@@ -221,7 +220,7 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 
 		if s.fragTarget(frag) != None {
 			off, end := val.SpanInt()
-			return 0, i, serr(DuplicateAnchor, anchor, off, end-off, ErrRef)
+			return 0, i, serr(DuplicateAnchor, anchor, off, end-off)
 		}
 
 		s.defs = append(s.defs, def{frag, node})
@@ -340,11 +339,11 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 			return 0, i, err
 		}
 	default:
-		return 0, i, serr(InvalidTypeShape, Type, st, i-st, ErrKeyword)
+		return 0, i, serr(InvalidTypeShape, Type, st, i-st)
 	}
 
 	if mask&typeErr != 0 {
-		return 0, i, serr(UnknownType, Type, st, i-st, ErrKeyword)
+		return 0, i, serr(UnknownType, Type, st, i-st)
 	}
 
 	return makeImm(Type, int(mask)), i, nil
@@ -366,7 +365,7 @@ func (s *Schema) enterKind(b []byte, st int, typ json2.Type, op Opcode) (int, er
 			code = MustBeArray
 		}
 
-		return i, serr(code, op, st, i-st, ErrKeyword)
+		return i, serr(code, op, st, i-st)
 	}
 
 	return d.Enter(b, st, typ)
@@ -470,7 +469,7 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 		}
 
 		if op == Required && val.Op() != String {
-			return 0, i, serr(RequiredNotString, Required, est, i-est, ErrKeyword)
+			return 0, i, serr(RequiredNotString, Required, est, i-est)
 		}
 
 		s.prog.tmp = append(s.prog.tmp, val)
@@ -552,7 +551,7 @@ func (s *Schema) kwNum(op Opcode, b []byte, st int) (Opcode, int, error) {
 	}
 
 	if val.Op() != Number {
-		return 0, i, serr(MustBeNumber, op, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeNumber, op, st, i-st)
 	}
 
 	off := len(s.prog.code)
@@ -571,7 +570,7 @@ func (s *Schema) kwImm(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	n, ok := integerValue(raw)
 	if !ok {
-		return 0, i, serr(MustBeInteger, op, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeInteger, op, st, i-st)
 	}
 
 	return makeImm(op, n), i, nil
@@ -602,7 +601,7 @@ func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
 
 	v, err := json2.Value(raw).Bool()
 	if err != nil {
-		return 0, i, serr(MustBeBool, Unique, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeBool, Unique, st, i-st)
 	}
 
 	if !v {
@@ -624,7 +623,7 @@ func (s *Schema) kwFormat(name, b []byte, kst, st int) (Opcode, int, error) {
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Format, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeString, Format, st, i-st)
 	}
 
 	fname, i, err := d.Key(b, i)
@@ -649,7 +648,7 @@ func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Pattern, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeString, Pattern, st, i-st)
 	}
 
 	j, err := d.Skip(b, i)
@@ -671,7 +670,7 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Ref, st, i-st, ErrKeyword)
+		return 0, i, serr(MustBeString, Ref, st, i-st)
 	}
 
 	j, err := d.Skip(b, i)
@@ -681,7 +680,7 @@ func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
 
 	// any URI-reference: "#..." internal, "doc#frag" external (resolved via docs).
 	if j-i-2 < 1 { // nothing between the quotes
-		return 0, i, serr(EmptyRef, Ref, st, j-st, ErrKeyword)
+		return 0, i, serr(EmptyRef, Ref, st, j-st)
 	}
 
 	op, err := s.prog.str(b, i, j, Ref, false)
@@ -763,12 +762,12 @@ func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
 		op = Ext
 	case unsupportedKeyword(name):
 		if s.Flags.Is(SchemaRejectUnsupported) {
-			return 0, st, serr(UnsupportedKeyword, None, kst, st-kst, ErrUnsupported)
+			return 0, st, serr(UnsupportedKeyword, None, kst, st-kst)
 		}
 	case annotationKeyword(name):
 		// inert even under strict: a legit no-op in our vocabulary
 	case s.Flags.Is(SchemaRejectUnknown):
-		return 0, st, serr(UnknownKeyword, None, kst, st-kst, ErrUnknownKeyword)
+		return 0, st, serr(UnknownKeyword, None, kst, st-kst)
 	}
 
 	var d json2.Iterator
@@ -812,7 +811,7 @@ func (s *Schema) checkRefs() error {
 
 		if doc == "" {
 			if s.fragTarget(frag) == None {
-				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt(), ErrRef)
+				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
 			}
 
 			continue
@@ -820,14 +819,14 @@ func (s *Schema) checkRefs() error {
 
 		if t := s.docs[doc]; t != nil {
 			if t.fragTarget(frag) == None {
-				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt(), ErrRef)
+				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
 			}
 
 			continue
 		}
 
 		if s.Resolve == nil {
-			return serr(NoResolver, op, op.OffInt(), op.ArgInt(), ErrRef)
+			return serr(NoResolver, op, op.OffInt(), op.ArgInt())
 		}
 	}
 
@@ -844,8 +843,7 @@ func (s *Schema) checkPatterns() error {
 
 		re, err := regexp.Compile(string(s.prog.Reader().Span(op)))
 		if err != nil {
-			reason := strings.TrimPrefix(err.Error(), "error parsing regexp: ")
-			return serr(BadPattern, op, op.OffInt(), op.ArgInt(), fmt.Errorf("%w: %s", ErrPattern, reason))
+			return serr(BadPattern, op, op.OffInt(), op.ArgInt())
 		}
 
 		if s.patterns == nil {
@@ -891,7 +889,7 @@ func (s *Schema) lookup(ref string, op Opcode) (*Schema, Opcode, error) {
 
 	tnode := t.fragTarget(frag)
 	if tnode == None {
-		return s, None, serr(UnresolvedRef, op, op.OffInt(), op.ArgInt(), ErrRef)
+		return s, None, serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
 	}
 
 	return t, tnode, nil
@@ -906,7 +904,7 @@ func (s *Schema) loadDoc(handle string) (*Schema, error) {
 	}
 
 	if s.Resolve == nil {
-		return nil, serr(NoResolver, None, 0, 0, ErrRef)
+		return nil, serr(NoResolver, None, 0, 0)
 	}
 
 	body, err := s.Resolve(s.ID, handle)
@@ -1009,7 +1007,7 @@ func (s *Schema) pointerTarget(p string) Opcode {
 // Ext hold literals, never a schema, so they are not looked up.
 func (s *Schema) keywordNamed(op Opcode, name string) Opcode {
 	for _, c := range s.prog.Reader().Nodes(op) {
-		if c.Op() != Raw && c.Op() != Ext && keywordName(c.Op()) == name {
+		if c.Op() != Raw && c.Op() != Ext && c.Keyword() == name {
 			return c
 		}
 	}

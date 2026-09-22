@@ -317,6 +317,51 @@ func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
 	}
 }
 
+// AppendPointer writes the data path the steps descended, in jq syntax:
+// .users[0].name, and "." at the root. Steps the data did not follow — $ref,
+// allOf, if — contribute nothing, which is what makes them None.
+func (b BufferReader) AppendPointer(w []byte, steps []Step) []byte {
+	mark := len(w)
+
+	for _, st := range steps {
+		switch st.DataKey.Op() {
+		case String:
+			key := b.Span(st.DataKey)
+
+			if identKey(key) {
+				w = append(append(w, '.'), key...)
+				continue
+			}
+
+			var e json2.Emitter
+
+			w = e.AppendString(append(w, '.'), key)
+		case IntLit:
+			w = append(strconv.AppendInt(append(w, '['), st.DataKey.Imm(), 10), ']')
+		}
+	}
+
+	if len(w) == mark {
+		w = append(w, '.')
+	}
+
+	return w
+}
+
+// identKey reports whether jq would take the key bare after a dot.
+func identKey(s []byte) bool {
+	for i, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
+		case i > 0 && c >= '0' && c <= '9':
+		default:
+			return false
+		}
+	}
+
+	return len(s) != 0
+}
+
 func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 	switch val.Op() {
 	case Null:

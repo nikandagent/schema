@@ -508,6 +508,45 @@ func TestBufferString(tb *testing.T) {
 	mustPanic(tb, "String(Null)", func() { r.String(w.Null()) })
 }
 
+func TestAppendPointer(tb *testing.T) {
+	var b Buffer
+
+	b.Reset()
+
+	r, w := b.Reader(), b.Writer()
+
+	key := func(s string) Step { return Step{DataKey: w.Span(String, []byte(s))} }
+	idx := func(i int) Step { return Step{DataKey: MakeInt(int64(i))} }
+	skip := Step{DataKey: None}
+
+	for _, tc := range []struct {
+		steps []Step
+		want  string
+	}{
+		{nil, "."},
+		{[]Step{key("a")}, ".a"},
+		{[]Step{key("users"), idx(0), key("name")}, ".users[0].name"},
+		{[]Step{idx(2), idx(10)}, "[2][10]"},
+		{[]Step{key("_x9")}, "._x9"},
+		{[]Step{key("a b")}, `."a b"`},
+		{[]Step{key("a-b")}, `."a-b"`},
+		{[]Step{key("1x")}, `."1x"`},
+		{[]Step{key("")}, `.""`},
+		{[]Step{key(`q"z`)}, `."q\"z"`},
+		{[]Step{key("café")}, `."café"`},
+		{[]Step{skip}, "."},
+		{[]Step{skip, key("a"), skip, idx(1), skip}, ".a[1]"},
+	} {
+		if got := string(r.AppendPointer(nil, tc.steps)); got != tc.want {
+			tb.Errorf("pointer %d steps: got %s, want %s", len(tc.steps), got, tc.want)
+		}
+	}
+
+	if got := string(r.AppendPointer([]byte("path: "), []Step{key("a")})); got != "path: .a" {
+		tb.Errorf("append to buffer: got %q", got)
+	}
+}
+
 func TestBufferDeref(tb *testing.T) {
 	for _, tc := range []struct {
 		schema string

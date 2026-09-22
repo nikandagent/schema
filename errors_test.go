@@ -9,19 +9,18 @@ import (
 
 func TestError(tb *testing.T) {
 	for _, tc := range []struct {
-		in     string
-		want   error
-		code   DiagCode
-		reason string // substring expected in err.Error(), wrapped from Err
+		in   string
+		want error
+		code DiagCode
 	}{
-		{`{"minLength":"x"}`, ErrKeyword, MustBeInteger, ""},
-		{`{"type":123}`, ErrKeyword, InvalidTypeShape, ""},
-		{`{"uniqueItems":1}`, ErrKeyword, MustBeBool, ""},
-		{`{"pattern":"("}`, ErrPattern, BadPattern, "missing closing )"},
-		{`{"$ref":123}`, ErrKeyword, MustBeString, ""},
-		{`{"$ref":""}`, ErrKeyword, EmptyRef, ""},
-		{`{"$ref":"#/$defs/missing"}`, ErrRef, UnresolvedRef, ""},
-		{`123`, ErrKeyword, SchemaMustBeObject, ""},
+		{`{"minLength":"x"}`, ErrKeyword, MustBeInteger},
+		{`{"type":123}`, ErrKeyword, InvalidTypeShape},
+		{`{"uniqueItems":1}`, ErrKeyword, MustBeBool},
+		{`{"pattern":"("}`, ErrPattern, BadPattern},
+		{`{"$ref":123}`, ErrKeyword, MustBeString},
+		{`{"$ref":""}`, ErrKeyword, EmptyRef},
+		{`{"$ref":"#/$defs/missing"}`, ErrRef, UnresolvedRef},
+		{`123`, ErrKeyword, SchemaMustBeObject},
 	} {
 		var s Schema
 
@@ -31,35 +30,32 @@ func TestError(tb *testing.T) {
 			continue
 		}
 
-		var e *Error
-		if !errors.As(err, &e) {
-			tb.Errorf("compile %q: err %v (%T) is not *Error", tc.in, err, err)
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Errorf("compile %q: err %v (%T) carries %d diags, want 1", tc.in, err, err, len(d))
 			continue
 		}
 
 		if !errors.Is(err, tc.want) {
 			tb.Errorf("compile %q: err %v, want Is(%v)", tc.in, err, tc.want)
 		}
-		if e.Diag.Code != tc.code {
-			tb.Errorf("compile %q: Code %v, want %v", tc.in, e.Diag.Code, tc.code)
-		}
-		if e.Err == nil {
-			tb.Errorf("compile %q: nil Err", tc.in)
+		if d[0].Code != tc.code {
+			tb.Errorf("compile %q: Code %v, want %v", tc.in, d[0].Code, tc.code)
 		}
 
-		if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
-			tb.Errorf("compile %q: err %q, want contains %q", tc.in, err.Error(), tc.reason)
+		want := tc.want.Error() + ": " + tc.code.String()
+		if err.Error() != want {
+			tb.Errorf("compile %q: err %q, want %q", tc.in, err.Error(), want)
 		}
 	}
 
-	// SchemaRejectUnknown surfaces an unknown-keyword *Error.
+	// SchemaRejectUnknown surfaces an unknown-keyword Diagnostics.
 	{
 		s := Schema{Flags: SchemaRejectUnknown}
 
 		err := s.Compile([]byte(`{"nope":1}`))
-		var e *Error
-		if !errors.As(err, &e) || !errors.Is(err, ErrUnknownKeyword) {
-			tb.Errorf(`compile {"nope":1} rejectUnknown: err %v, want ErrUnknownKeyword *Error`, err)
+		if !errors.As(err, &Diagnostics{}) || !errors.Is(err, ErrUnknownKeyword) {
+			tb.Errorf(`compile {"nope":1} rejectUnknown: err %v, want ErrUnknownKeyword Diagnostics`, err)
 		}
 	}
 
@@ -68,44 +64,46 @@ func TestError(tb *testing.T) {
 		var s Schema
 		err := s.Compile([]byte(`{"$ref":"#/$defs/missing"}`))
 
-		var e *Error
-		if !errors.As(err, &e) {
-			tb.Fatalf(`$ref missing: err %v is not *Error`, err)
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Fatalf(`$ref missing: err %v is not Diagnostics`, err)
 		}
-		if !(e.Diag.Off > 0 && e.Diag.End-e.Diag.Off == len("#/$defs/missing")) {
-			tb.Errorf(`$ref missing: Off=%d End=%d, want Off>0 len=%d`, e.Diag.Off, e.Diag.End, len("#/$defs/missing"))
+		if !(d[0].Off > 0 && d[0].End-d[0].Off == len("#/$defs/missing")) {
+			tb.Errorf(`$ref missing: Off=%d End=%d, want Off>0 len=%d`, d[0].Off, d[0].End, len("#/$defs/missing"))
 		}
 	}
 	{
 		var s Schema
 		err := s.Compile([]byte(`{"minLength":"x"}`))
 
-		var e *Error
-		if !errors.As(err, &e) {
-			tb.Fatalf(`minLength: err %v is not *Error`, err)
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Fatalf(`minLength: err %v is not Diagnostics`, err)
 		}
-		if !(e.Diag.Off > 0 && e.Diag.End > e.Diag.Off) {
-			tb.Errorf(`minLength: Off=%d End=%d, want Off>0 End>Off`, e.Diag.Off, e.Diag.End)
+		if !(d[0].Off > 0 && d[0].End > d[0].Off) {
+			tb.Errorf(`minLength: Off=%d End=%d, want Off>0 End>Off`, d[0].Off, d[0].End)
+		}
+		if d[0].Op.Op() != MinLen {
+			tb.Errorf(`minLength: Op=%v, want MinLen`, d[0].Op.Op())
 		}
 	}
 
-	// Scope boundary: pure JSON-shape failures are not wrapped into *Error.
+	// Scope boundary: pure JSON-shape failures are not wrapped into Diagnostics.
 	for _, tc := range []struct {
 		in   string
 		want error
 	}{
 		// `{` is a truncated prefix; Compile normalizes json2's short-buffer
 		// signal to ErrSyntax (malformed input in a complete document). The
-		// load-bearing check is that these are NOT wrapped into *Error.
+		// load-bearing check is that these are NOT wrapped into Diagnostics.
 		{`{`, ErrSyntax},
 		{`{} junk`, ErrTrailingData},
 	} {
 		var s Schema
 		err := s.Compile([]byte(tc.in))
 
-		var e *Error
-		if errors.As(err, &e) {
-			tb.Errorf("compile %q: unexpectedly wrapped into *Error: %v", tc.in, err)
+		if d := AsDiag(err); d != nil {
+			tb.Errorf("compile %q: unexpectedly wrapped into Diagnostics: %v", tc.in, err)
 		}
 		if !errors.Is(err, tc.want) {
 			tb.Errorf("compile %q: err %v, want Is(%v)", tc.in, err, tc.want)
@@ -126,7 +124,7 @@ func TestInvalid(tb *testing.T) {
 		tb.Fatalf("compile: %v", err)
 	}
 
-	diags, err := s.Validate([]byte(`{}`))
+	diags, err := validate(&s, []byte(`{}`))
 	if err != nil {
 		tb.Fatalf("validate: %v", err)
 	}
@@ -173,7 +171,7 @@ func TestFormatNicely(tb *testing.T) {
 			tb.Fatalf("compile %q: %v", src, err)
 		}
 
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate %q: %v", data, err)
 		}
@@ -236,7 +234,7 @@ func TestFormatNicely(tb *testing.T) {
 		}
 
 		data := `{}`
-		diag, err := s.Validate([]byte(data))
+		diag, err := validate(&s, []byte(data))
 		if err != nil {
 			tb.Fatalf("validate: %v", err)
 		}
@@ -281,6 +279,158 @@ func TestFormatNicely(tb *testing.T) {
 		lines := strings.SplitN(got, "\n", 2)
 		if indent := strings.IndexByte(lines[1], '^'); indent != 1 {
 			tb.Errorf("E wide: caret indent %d, want 1 (stayed within 128): %q", indent, got)
+		}
+	}
+}
+
+func TestDiagOp(tb *testing.T) {
+	for _, tc := range []struct {
+		schema, data string
+		code         DiagCode
+		op           Opcode
+		value        string
+		span         string
+	}{
+		{`{"type":["integer","null"]}`, `"x"`, TypeMismatch, Type, `["null","integer"]`, `x`},
+		{`{"minLength":3}`, `"ab"`, TooShort, MinLen, `3`, `ab`},
+		{`{"maxLength":1}`, `"ab"`, TooLong, MaxLen, `1`, `ab`},
+		{`{"minimum":3}`, `2`, BelowMinimum, Minimum, `3`, `2`},
+		{`{"enum":[1,2]}`, `3`, MustMatchEnum, Enum, `[1,2]`, `3`},
+		{`{"const":"a"}`, `"b"`, MustConst, Const, `"a"`, `b`},
+		{`{"pattern":"^a+$"}`, `"b"`, PatternMismatch, Pattern, `"^a+$"`, `b`},
+		{`{"format":"uuid"}`, `"x"`, FormatMismatch, Format, `"uuid"`, `x`},
+		{`{"minItems":2}`, `[1]`, TooFewItems, MinItems, `2`, `[1]`},
+		{`{"uniqueItems":true}`, `[1,2,1]`, DuplicateItems, Unique, `true`, `1`},
+		{`{"minProperties":1}`, `{}`, TooFewProps, MinProps, `1`, `{}`},
+		{`{"not":{"type":"integer"}}`, `5`, MustNotMatch, Not, `{"type":"integer"}`, `5`},
+		{`{"anyOf":[{"type":"integer"}]}`, `"x"`, MustMatchAny, AnyOf, `[{"type":"integer"}]`, `x`},
+		{`{"oneOf":[{"type":"integer"},{"type":"string"}]}`, `true`, MustMatchOne, OneOf, `[{"type":"integer"},{"type":"string"}]`, `true`},
+		{`{"oneOf":[{"type":"integer"},{"type":"number"}]}`, `5`, MustMatchOnlyOne, OneOf, `[{"type":"integer"},{"type":"number"}]`, `5`},
+		{`{"properties":{"a":{}},"additionalProperties":false}`, `{"a":1,"zz":2}`, Forbidden, Additional, `false`, `zz`},
+		{`{"properties":{"a":false}}`, `{"a":1}`, Forbidden, Properties, `{"a":false}`, `a`},
+		{`false`, `5`, Forbidden, Fail, `false`, `5`},
+	} {
+		s := &Schema{Flags: AssertStringFormat}
+		if err := s.Compile([]byte(tc.schema)); err != nil {
+			tb.Errorf("compile %s: %v", tc.schema, err)
+			continue
+		}
+
+		d, err := validate(s, []byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s: %v", tc.data, err)
+			continue
+		}
+
+		if len(d) != 1 {
+			tb.Errorf("validate %s against %s: %d diags, want 1: %+v", tc.data, tc.schema, len(d), d)
+			continue
+		}
+
+		if d[0].Code != tc.code || d[0].Op.Op() != tc.op {
+			tb.Errorf("validate %s against %s: %v on %d, want %v on %d", tc.data, tc.schema, d[0].Code, d[0].Op.Op(), tc.code, tc.op)
+		}
+
+		if got := string(s.FormatKeyword(nil, d[0].Op)); got != tc.value {
+			tb.Errorf("validate %s against %s: keyword value %s, want %s", tc.data, tc.schema, got, tc.value)
+		}
+
+		if got := tc.data[d[0].Off:d[0].End]; got != tc.span {
+			tb.Errorf("validate %s against %s: span %q, want %q", tc.data, tc.schema, got, tc.span)
+		}
+	}
+}
+
+func TestDiagDetails(tb *testing.T) {
+	s, err := Compile([]byte(`{"type":["integer","null"],"minLength":3,"pattern":"^a+$"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	d, err := validate(s, []byte(`"b"`))
+	if err != nil || len(d) != 3 {
+		tb.Fatalf("diags=%v err=%v, want 3", d, err)
+	}
+
+	r := s.Reader()
+
+	for _, x := range d {
+		switch x.Code {
+		case TypeMismatch:
+			if got := TypesOf(x.Op); got != TypeInteger|TypeNull {
+				tb.Errorf("type: %v", got)
+			}
+		case TooShort:
+			if x.Op.Imm() != 3 {
+				tb.Errorf("minLength: %d", x.Op.Imm())
+			}
+		case PatternMismatch:
+			if got := string(r.String(x.Op)); got != "^a+$" {
+				tb.Errorf("pattern: %q", got)
+			}
+		default:
+			tb.Errorf("unexpected %v", x.Code)
+		}
+	}
+}
+
+func TestDiagMissingRequired(tb *testing.T) {
+	s, err := Compile([]byte(`{"required":["a","b","c"]}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	data := []byte(`{"b":1}`)
+
+	d, err := validate(s, data)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if len(d) != 2 {
+		tb.Fatalf("diags=%d, want one per missing name: %+v", len(d), d)
+	}
+
+	r := s.Reader()
+
+	for i, want := range []string{"a", "c"} {
+		if d[i].Code != MissingRequired {
+			tb.Errorf("diag %d: %v", i, d[i].Code)
+		}
+
+		if got := string(r.String(d[i].Op)); got != want {
+			tb.Errorf("diag %d: name %q, want %q", i, got, want)
+		}
+
+		if got := string(data[d[i].Off:d[i].End]); got != string(data) {
+			tb.Errorf("diag %d: span %q, want the object", i, got)
+		}
+	}
+}
+
+func TestDiagDuplicateItems(tb *testing.T) {
+	s, err := Compile([]byte(`{"uniqueItems":true}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		data string
+		span string
+	}{
+		{`[1,2,1]`, `1`},
+		{`["a","b","b"]`, `b`},
+		{`[{"k":1},{"k":2},{"k":1}]`, `{"k":1}`},
+	} {
+		d, err := validate(s, []byte(tc.data))
+		if err != nil || len(d) != 1 {
+			tb.Errorf("validate %s: diags=%v err=%v", tc.data, d, err)
+			continue
+		}
+
+		// the second occurrence, not the array
+		if d[0].Off <= strings.Index(tc.data, tc.span) || tc.data[d[0].Off:d[0].End] != tc.span {
+			tb.Errorf("validate %s: span %d:%d %q, want the duplicate %q", tc.data, d[0].Off, d[0].End, tc.data[d[0].Off:d[0].End], tc.span)
 		}
 	}
 }

@@ -22,7 +22,7 @@ func validFlags(tb *testing.T, src, data string, fl Flags) bool {
 
 	s := compileFlags(tb, src, fl)
 
-	d, err := s.Validate([]byte(data))
+	d, err := validate(s, []byte(data))
 	if err != nil {
 		tb.Fatalf("validate %q against %q: %v", data, src, err)
 	}
@@ -181,8 +181,7 @@ func TestFormatCompileError(tb *testing.T) {
 			tb.Errorf("compile %q: err %v, want Is(ErrKeyword)", in, err)
 		}
 
-		var e *Error
-		if !errors.As(err, &e) || e.Diag.Code != MustBeString {
+		if d := AsDiag(err); len(d) != 1 || d[0].Code != MustBeString {
 			tb.Errorf("compile %q: err %v, want MustBeString", in, err)
 		}
 	}
@@ -193,7 +192,7 @@ func TestFormatDiag(tb *testing.T) {
 
 	data := []byte(`{"id":"nope"}`)
 
-	d, err := s.Validate(data)
+	d, err := validate(s, data)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -202,7 +201,7 @@ func TestFormatDiag(tb *testing.T) {
 		tb.Fatalf("diags=%d, want 1: %+v", len(d), d)
 	}
 
-	if d[0].Code != FormatMismatch || d[0].Op != Format {
+	if d[0].Code != FormatMismatch || d[0].Op.Op() != Format {
 		tb.Errorf("diag=%+v, want FormatMismatch on Format", d[0])
 	}
 

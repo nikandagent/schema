@@ -10,156 +10,156 @@ import (
 )
 
 type (
-	Applier struct {
-		s *Schema
-		b Buffer
+	// Step is one subschema entry in the descent. Op is the keyword entered
+	// through, Value names the way in — the property name, the pattern, the
+	// branch index, the ref pointer — and Sub is the subschema reached. Doc is
+	// the document Sub lives in, which changes only at a $ref. DataKey is the
+	// data key or index the value descended by, None when the data stayed put,
+	// which is what tells an in-place applicator from a real step.
+	Step struct {
+		Doc   *Schema
+		Op    Opcode
+		Value Opcode
+		Sub   Opcode
 
-		diag []Diag
-
-		spath []Opcode
-		dpath []Opcode
-
-		at   []Opcode
-		from Opcode // the node the walk starts at, None for the root
-
-		opbuf [23]Opcode // spath[:8] | dpath[8:16] | at[16:23]; sized so Applier fills the 896 bucket
-		dbuf  [3]Diag
-
-		rewrite bool
+		DataKey Opcode
 	}
 
-	// Handler is called per node during a Walk. It receives the handler to
-	// delegate with (normally itself, so children reach the handler too) and
-	// passes it on to Apply — pass nil to run a subtree with default behaviour
-	// only, or a different Handler to swap behaviour for that subtree.
-	Handler func(c *Applier, op, val Opcode, h Handler) (Opcode, error)
+	Applier struct {
+		// Buffer is the data arena the walk decodes into and rewrites through.
+		Buffer Buffer
+
+		// Diags is every finding so far. The engine only appends to it or
+		// truncates it — a trial branch rewinds it whole — so an index is stable
+		// while it lives, and a handler that filters out a middle entry breaks
+		// that for everyone downstream.
+		Diags []Diag
+
+		// Steps is the descent from the root: one per subschema entered,
+		// including the ones the data does not follow ($ref, allOf, if). Live
+		// during the walk only; copy what you keep.
+		Steps []Step
+
+		// Depth is how far the data descended: the number of steps that moved it.
+		Depth int
+
+		dbuf [4]Diag // inline room for the first findings, filling the 768 bucket
+
+		rewrite bool
+		save    bool // copy Steps into every Diag
+	}
+
+	// Handler is called per node during a Walk. s is the document the node
+	// lives in, which changes at a $ref. It receives the handler to delegate
+	// with (normally itself, so children reach the handler too) and passes it
+	// on to Apply — pass nil to run a subtree with default behaviour only, or a
+	// different Handler to swap behaviour for that subtree.
+	Handler func(a *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error)
 )
 
 // ErrBreak is returned by a Handler to stop the walk cleanly.
 var ErrBreak = errors.New("break")
 
-func (s *Schema) Validate(doc []byte, opts ...Option) ([]Diag, error) {
-	return s.Walk(doc, nil, opts...)
+// Validate runs s over doc, reporting what does not hold. The Applier is the
+// workspace: its Diags, Steps and Buffer are readable until the next run.
+func (a *Applier) Validate(s *Schema, doc []byte) ([]Diag, error) {
+	return a.Walk(s, None, doc, nil)
 }
 
-func (s *Schema) Rewrite(w, doc []byte, opts ...Option) ([]byte, []Diag, error) {
-	return s.WalkRewrite(w, doc, nil, opts...)
-}
-
-func (s *Schema) Walk(doc []byte, h Handler, opts ...Option) ([]Diag, error) {
-	_, a, err := s.walk(doc, h, false, opts...)
+// Walk validates doc against node op of s — None for the root, any subschema
+// for a fragment — calling h for every node it visits.
+func (a *Applier) Walk(s *Schema, op Opcode, doc []byte, h Handler) ([]Diag, error) {
+	_, err := a.walk(s, op, doc, h, false)
 	if err != nil {
 		return nil, err
 	}
 
-	return a.diag, err
+	return a.Diags, nil
 }
 
-func (s *Schema) WalkRewrite(w, doc []byte, h Handler, opts ...Option) ([]byte, []Diag, error) {
-	res, a, err := s.walk(doc, h, true, opts...)
+// Rewrite validates doc and appends its canonical form to buf: key order, filled
+// defaults and normalized whitespace, per s.Flags.
+func (a *Applier) Rewrite(s *Schema, op Opcode, doc, buf []byte, h Handler) ([]byte, []Diag, error) {
+	res, err := a.walk(s, op, doc, h, true)
 	if err != nil {
-		return w, nil, err
-	}
-	if res == None {
-		return w, a.diag, nil
+		return buf, nil, err
 	}
 
-	return a.b.Reader().AppendJSON(w, res), a.diag, nil
+	if res == None {
+		return buf, a.Diags, nil
+	}
+
+	return a.Buffer.Reader().AppendJSON(buf, res), a.Diags, nil
 }
 
-func (s *Schema) walk(doc []byte, h Handler, rewrite bool, opts ...Option) (_ Opcode, a *Applier, err error) {
-	for _, o := range opts {
-		if u, ok := o.(use); ok {
-			a = u.a
-		}
-	}
-
-	if a == nil {
-		a = &s.c
-	}
-
+func (a *Applier) walk(s *Schema, op Opcode, doc []byte, h Handler, rewrite bool) (Opcode, error) {
 	a.reset(s, rewrite)
 
-	root, err := a.b.decode(doc)
+	root, err := a.Buffer.decode(doc)
 	if err != nil {
-		return None, nil, err
+		return None, err
 	}
 
-	for _, o := range opts {
-		err := o.apply(a)
-		if err != nil {
-			return None, nil, err
-		}
+	if op == None {
+		op = s.root
 	}
 
-	from := s.root
-	if a.from != None {
-		from = a.from
-	}
-
-	res, err := a.apply(from, root, h)
+	res, err := a.apply(s, op, root, h)
 	if errors.Is(err, ErrBreak) {
 		err = nil
 	}
 
-	return res, a, err
+	return res, err
 }
 
-func (a *Applier) Buffer() *Buffer            { return &a.b }
-func (a *Applier) SchemaReader() BufferReader { return a.s.prog.Reader() }
-func (a *Applier) Rewriting() bool            { return a.rewrite }
-
-// Diags is the accumulated diagnostics so far; its length marks the point before
-// a subtree ran. SetDiags writes back a filtered slice — snapshot len(Diags()),
-// recurse via Apply, then drop the tail's unwanted entries. See matches, which
-// uses the same snapshot/rewind internally to discard a trial branch's diags.
-func (a *Applier) Diags() []Diag     { return a.diag }
-func (a *Applier) SetDiags(d []Diag) { a.diag = d }
-
-func (a *Applier) DataPath() []Opcode   { return a.dpath }
-func (a *Applier) SchemaPath() []Opcode { return a.spath }
+func (a *Applier) Rewriting() bool { return a.rewrite }
 
 // Two arenas, walked in parallel but never interlinked — each node's spans
 // point only into its own bytes:
 //
-//	schema (program)  nodes s.prog.code | bytes s.prog.src           (read-only)
-//	data              nodes c.b.code    | bytes c.b.src ++ c.b.text
+//	schema (program)  nodes s.prog.code   | bytes s.prog.src         (read-only)
+//	data              nodes a.Buffer.code | bytes a.Buffer.src ++ a.Buffer.text
 //
 // A block payload (off,count) indexes its arena's nodes; a span (off,len) its
 // bytes. Bytes slices are read-only, so rewrites that synthesize literals
-// (defaults, canon) copy the bytes into the writable c.b.text tail and build
-// nodes in c.b.code (data is where changes live). Data spans resolve a virtual
+// (defaults, canon) copy the bytes into the writable text tail and build nodes
+// in the data arena (data is where changes live). Data spans resolve a virtual
 // src++text concat by off vs len(src), so the input is never copied.
 
 // apply dispatches one node: if h is set the handler sees it first (and may
 // rewrite it or recurse via Apply), otherwise the default behaviour runs. h is
 // threaded through every recursion so the caller always knows which handler is
 // in effect, instead of it being implicit state.
-func (a *Applier) apply(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) apply(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if h == nil {
-		return a.applyStep(op, val, h)
+		return a.applyStep(s, op, val, h)
 	}
 
-	return h(a, op, val, h)
+	return h(a, s, op, val, h)
 }
 
 // Apply runs the default behaviour for a node — the handler's delegate point.
 // Its recursions dispatch through h, so pass the handler along (normally the one
 // the handler was given) to keep seeing children, or nil to fall to default.
-func (a *Applier) Apply(op, val Opcode, h Handler) (Opcode, error) {
-	return a.applyStep(op, val, h)
+func (a *Applier) Apply(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	return a.applyStep(s, op, val, h)
 }
 
-func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) applyStep(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	switch op.Op() {
 	case Pass:
 	case Fail:
-		a.Fail(Forbidden, op, val)
+		// A forbidden member is reported at its key, as its keyword's finding.
+		if n := len(a.Steps); n != 0 && a.Steps[n-1].DataKey != None {
+			a.Fail(Forbidden, a.Steps[n-1].Op, a.Steps[n-1].DataKey)
+		} else {
+			a.Fail(Forbidden, op, val)
+		}
 	case All:
 		off, n := op.Off(), op.Arg()
 
 		for i := range n {
-			nv, err := a.apply(a.s.prog.code[off+i], val, h)
+			nv, err := a.apply(s, s.prog.code[off+i], val, h)
 			if err != nil {
 				return nv, err
 			}
@@ -169,9 +169,9 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	case Type:
 		a.checkType(op, val)
 	case Properties:
-		return a.checkProps(op, val, h)
+		return a.checkProps(s, op, val, h)
 	case Required:
-		a.checkRequired(op, val)
+		a.checkRequired(s, op, val)
 	case MinProps:
 		if val.Op() == Object && val.Arg() < op.Imm() {
 			a.Fail(TooFewProps, op, val)
@@ -181,9 +181,9 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 			a.Fail(TooManyProps, op, val)
 		}
 	case Prefix:
-		return a.checkPrefix(op, val, h)
+		return a.checkPrefix(s, op, val, h)
 	case Items:
-		return a.checkItems(op, val, h)
+		return a.checkItems(s, op, val, h)
 	case MinItems:
 		if val.Op() == Array && val.Arg() < op.Imm() {
 			a.Fail(TooFewItems, op, val)
@@ -205,33 +205,33 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 			a.Fail(TooLong, op, val)
 		}
 	case Minimum:
-		if isNumber(val) && a.number(val) < a.schemaNum(op) {
+		if isNumber(val) && a.number(val) < a.schemaNum(s, op) {
 			a.Fail(BelowMinimum, op, val)
 		}
 	case Maximum:
-		if isNumber(val) && a.number(val) > a.schemaNum(op) {
+		if isNumber(val) && a.number(val) > a.schemaNum(s, op) {
 			a.Fail(AboveMaximum, op, val)
 		}
 	case ExclMin:
-		if isNumber(val) && a.number(val) <= a.schemaNum(op) {
+		if isNumber(val) && a.number(val) <= a.schemaNum(s, op) {
 			a.Fail(BelowMinimumExcl, op, val)
 		}
 	case ExclMax:
-		if isNumber(val) && a.number(val) >= a.schemaNum(op) {
+		if isNumber(val) && a.number(val) >= a.schemaNum(s, op) {
 			a.Fail(AboveMaximumExcl, op, val)
 		}
 	case MultipleOf:
-		if isNumber(val) && !a.multipleOf(op, val) {
+		if isNumber(val) && !a.multipleOf(s, op, val) {
 			a.Fail(NotMultipleOf, op, val)
 		}
 	case Enum:
-		a.checkEnum(op, val)
+		a.checkEnum(s, op, val)
 	case Const:
-		if !a.equalLit(val, a.s.prog.code[op.Off()]) {
+		if !a.equalLit(s, val, s.prog.code[op.Off()]) {
 			a.Fail(MustConst, op, val)
 		}
 	case Not:
-		ok, err := a.matches(a.s.prog.code[op.Off()], val, h)
+		ok, err := a.matches(s, Step{Op: op, Sub: s.prog.code[op.Off()]}, val, h)
 		if err != nil {
 			return val, err
 		}
@@ -243,49 +243,44 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 		off, n := op.Off(), op.Arg()
 
 		for i := range n {
-			if _, err := a.apply(a.s.prog.code[off+i], val, h); err != nil {
+			st := Step{Op: op, Value: MakeInt(i), Sub: s.prog.code[off+i]}
+
+			if _, err := a.applyChild(s, st, val, h); err != nil {
 				return val, err
 			}
 		}
 	case AnyOf:
-		if err := a.checkAnyOf(op, val, h); err != nil {
+		if err := a.checkAnyOf(s, op, val, h); err != nil {
 			return val, err
 		}
 	case OneOf:
-		if err := a.checkOneOf(op, val, h); err != nil {
+		if err := a.checkOneOf(s, op, val, h); err != nil {
 			return val, err
 		}
 	case If:
-		return a.checkCond(op, val, h)
+		return a.checkCond(s, op, val, h)
 	case Then, Else:
 		// consumed by the sibling If
 	case Ref:
-		// An external ref lives in another document's program arena; swap it in for
-		// the subtree (the data arena c.b stays put), then restore.
-		ts, tnode, err := a.s.RefTarget(op)
+		// An external ref lives in another document's program arena; the subtree
+		// runs on that document, the data arena stays put.
+		ts, tnode, err := s.RefTarget(op)
 		if err != nil {
 			return val, err
 		}
 
-		if ts == a.s {
-			return a.apply(tnode, val, h)
-		}
-
-		defer func(s *Schema) { a.s = s }(a.s)
-		a.s = ts
-
-		return a.apply(tnode, val, h)
+		return a.applyChild(ts, Step{Doc: ts, Op: op, Value: op, Sub: tnode}, val, h)
 	case Additional:
-		return a.checkAdditional(op, val, h)
+		return a.checkAdditional(s, op, val, h)
 	case PatternProps:
-		return a.checkPatternProps(op, val, h)
+		return a.checkPatternProps(s, op, val, h)
 	case Format:
-		if a.s.Flags.Is(AssertStringFormat) && val.Op() == String &&
-			!formatOK(a.b.Reader().Span(val), strFormat(op.Imm()), a.s.Flags) {
+		if s.Flags.Is(AssertStringFormat) && val.Op() == String &&
+			!formatOK(a.Buffer.Reader().Span(val), strFormat(op.Imm()), s.Flags) {
 			a.Fail(FormatMismatch, op, val)
 		}
 	case Pattern:
-		if val.Op() == String && !a.s.patterns[op].Match(a.b.Reader().String(val)) {
+		if val.Op() == String && !s.patterns[op].Match(a.Buffer.Reader().String(val)) {
 			a.Fail(PatternMismatch, op, val)
 		}
 	case Raw, Ext, Default, Defs:
@@ -299,18 +294,33 @@ func (a *Applier) applyStep(op, val Opcode, h Handler) (Opcode, error) {
 	return val, nil
 }
 
-func (a *Applier) applyChild(sub, val, step Opcode, h Handler) (Opcode, error) {
-	mark := len(a.spath)
+func (a *Applier) applyChild(s *Schema, st Step, val Opcode, h Handler) (Opcode, error) {
+	a.push(s, &st)
+	defer a.pop()
 
-	a.spath = append(a.spath, sub)
-	a.dpath = append(a.dpath, step)
+	return a.apply(s, st.Sub, val, h)
+}
 
-	defer func() {
-		a.spath = a.spath[:mark]
-		a.dpath = a.dpath[:mark]
-	}()
+func (a *Applier) push(s *Schema, st *Step) {
+	if st.Doc == nil {
+		st.Doc = s
+	}
 
-	return a.apply(sub, val, h)
+	if st.DataKey != None {
+		a.Depth++
+	}
+
+	a.Steps = append(a.Steps, *st)
+}
+
+func (a *Applier) pop() {
+	last := len(a.Steps) - 1
+
+	if a.Steps[last].DataKey != None {
+		a.Depth--
+	}
+
+	a.Steps = a.Steps[:last]
 }
 
 func (a *Applier) checkType(op, val Opcode) {
@@ -327,48 +337,31 @@ func (a *Applier) checkType(op, val Opcode) {
 	}
 }
 
-func (a *Applier) checkProps(op, val Opcode, h Handler) (Opcode, error) {
-	seek := a.seeking()
-
-	switch seek.Op() {
-	case None, Key, Each:
-		// ok
-	case IntLit:
-		a.Fail(InvalidObjectKey, op, None)
-		return val, nil
-	default:
-		panic(seek.Op())
-	}
-
+func (a *Applier) checkProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
 
 	if !a.rewrite {
-		return val, a.validateProps(op, val, h)
+		return val, a.validateProps(s, op, val, h)
 	}
 
-	return a.rewriteProps(op, val, h)
+	return a.rewriteProps(s, op, val, h)
 }
 
-func (a *Applier) validateProps(op, val Opcode, h Handler) error {
-	seek := a.seeking()
+func (a *Applier) validateProps(s *Schema, op, val Opcode, h Handler) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		name := a.s.prog.code[off+2*i]
-		sub := a.s.prog.code[off+2*i+1]
+		name := s.prog.code[off+2*i]
+		sub := s.prog.code[off+2*i+1]
 
-		if seek.Op() == Key && !a.idEq(seek, name) {
-			continue
-		}
-
-		key, v, ok := a.member(val, name)
+		key, v, ok := a.member(s, val, name)
 		if !ok {
 			continue
 		}
 
-		if _, err := a.applyChild(sub, v, key, h); err != nil {
+		if _, err := a.applyChild(s, Step{Op: op, Value: name, Sub: sub, DataKey: key}, v, h); err != nil {
 			return err
 		}
 	}
@@ -376,17 +369,17 @@ func (a *Applier) validateProps(op, val Opcode, h Handler) error {
 	return nil
 }
 
-func (a *Applier) rewriteProps(op, val Opcode, h Handler) (Opcode, error) {
-	mark := len(a.b.tmp)
-	defer func() { a.b.tmp = a.b.tmp[:mark] }()
+func (a *Applier) rewriteProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	mark := len(a.Buffer.tmp)
+	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
 	var dirty bool
 	var err error
 
-	if a.s.Flags.Is(KeepKeyOrder) {
-		dirty, err = a.orderedProps(op, val, h)
+	if s.Flags.Is(KeepKeyOrder) {
+		dirty, err = a.orderedProps(s, op, val, h)
 	} else {
-		dirty, err = a.canonProps(op, val, h)
+		dirty, err = a.canonProps(s, op, val, h)
 	}
 
 	if err != nil {
@@ -397,20 +390,20 @@ func (a *Applier) rewriteProps(op, val Opcode, h Handler) (Opcode, error) {
 		return val, nil
 	}
 
-	return a.b.Writer().Object(a.b.tmp[mark:]...), nil
+	return a.Buffer.Writer().Object(a.Buffer.tmp[mark:]...), nil
 }
 
-func (a *Applier) orderedProps(op, val Opcode, h Handler) (bool, error) {
+func (a *Applier) orderedProps(s *Schema, op, val Opcode, h Handler) (bool, error) {
 	dirty := false
 
 	voff, vn := val.Off(), val.Arg()
 
 	for i := range vn {
-		key := a.b.code[voff+2*i]
-		v := a.b.code[voff+2*i+1]
+		key := a.Buffer.code[voff+2*i]
+		v := a.Buffer.code[voff+2*i+1]
 
-		if sub, ok := a.propSub(op, key); ok {
-			nv, err := a.applyChild(sub, v, key, h)
+		if name, sub, ok := a.propSub(s, op, key); ok {
+			nv, err := a.applyChild(s, Step{Op: op, Value: name, Sub: sub, DataKey: key}, v, h)
 			if err != nil {
 				return dirty, err
 			}
@@ -421,24 +414,24 @@ func (a *Applier) orderedProps(op, val Opcode, h Handler) (bool, error) {
 			}
 		}
 
-		a.b.tmp = append(a.b.tmp, key, v)
+		a.Buffer.tmp = append(a.Buffer.tmp, key, v)
 	}
 
-	if a.s.Flags.Is(KeepMissing) {
+	if s.Flags.Is(KeepMissing) {
 		return dirty, nil
 	}
 
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		name := a.s.prog.code[off+2*i]
+		name := s.prog.code[off+2*i]
 
-		if _, _, ok := a.member(val, name); ok {
+		if _, _, ok := a.member(s, val, name); ok {
 			continue
 		}
 
-		if dv, ok := a.defaultOf(a.s.prog.code[off+2*i+1]); ok {
-			a.b.tmp = append(a.b.tmp, a.copyLit(name), a.copyLit(dv))
+		if dv, ok := a.defaultOf(s, s.prog.code[off+2*i+1]); ok {
+			a.Buffer.tmp = append(a.Buffer.tmp, a.copyLit(s, name), a.copyLit(s, dv))
 			dirty = true
 		}
 	}
@@ -446,7 +439,7 @@ func (a *Applier) orderedProps(op, val Opcode, h Handler) (bool, error) {
 	return dirty, nil
 }
 
-func (a *Applier) canonProps(op, val Opcode, h Handler) (bool, error) {
+func (a *Applier) canonProps(s *Schema, op, val Opcode, h Handler) (bool, error) {
 	voff, vn := val.Off(), val.Arg()
 
 	dirty := false
@@ -455,75 +448,75 @@ func (a *Applier) canonProps(op, val Opcode, h Handler) (bool, error) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		name := a.s.prog.code[off+2*i]
-		sub := a.s.prog.code[off+2*i+1]
+		name := s.prog.code[off+2*i]
+		sub := s.prog.code[off+2*i+1]
 
-		if key, v, ok := a.member(val, name); ok {
-			nv, err := a.applyChild(sub, v, key, h)
+		if key, v, ok := a.member(s, val, name); ok {
+			nv, err := a.applyChild(s, Step{Op: op, Value: name, Sub: sub, DataKey: key}, v, h)
 			if err != nil {
 				return dirty, err
 			}
 
 			v = nv
 
-			if key != a.b.code[voff+2*j] || v != a.b.code[voff+2*j+1] {
+			if key != a.Buffer.code[voff+2*j] || v != a.Buffer.code[voff+2*j+1] {
 				dirty = true
 			}
 
-			a.b.tmp = append(a.b.tmp, key, v)
+			a.Buffer.tmp = append(a.Buffer.tmp, key, v)
 			j++
 			continue
 		}
 
-		if a.s.Flags.Is(KeepMissing) {
+		if s.Flags.Is(KeepMissing) {
 			continue
 		}
 
-		if dv, ok := a.defaultOf(sub); ok {
-			a.b.tmp = append(a.b.tmp, a.copyLit(name), a.copyLit(dv))
+		if dv, ok := a.defaultOf(s, sub); ok {
+			a.Buffer.tmp = append(a.Buffer.tmp, a.copyLit(s, name), a.copyLit(s, dv))
 			dirty = true
 		}
 	}
 
 	for i := range vn {
-		key := a.b.code[voff+2*i]
-		v := a.b.code[voff+2*i+1]
+		key := a.Buffer.code[voff+2*i]
+		v := a.Buffer.code[voff+2*i+1]
 
-		if _, ok := a.propSub(op, key); ok {
+		if _, _, ok := a.propSub(s, op, key); ok {
 			continue
 		}
 
-		if key != a.b.code[voff+2*j] || v != a.b.code[voff+2*j+1] {
+		if key != a.Buffer.code[voff+2*j] || v != a.Buffer.code[voff+2*j+1] {
 			dirty = true
 		}
 
-		a.b.tmp = append(a.b.tmp, key, v)
+		a.Buffer.tmp = append(a.Buffer.tmp, key, v)
 		j++
 	}
 
 	return dirty, nil
 }
 
-func (a *Applier) propSub(op, key Opcode) (Opcode, bool) {
+func (a *Applier) propSub(s *Schema, op, key Opcode) (name, sub Opcode, ok bool) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		if a.keyEq(key, a.s.prog.code[off+2*i]) {
-			return a.s.prog.code[off+2*i+1], true
+		if a.keyEq(s, key, s.prog.code[off+2*i]) {
+			return s.prog.code[off+2*i], s.prog.code[off+2*i+1], true
 		}
 	}
 
-	return 0, false
+	return None, None, false
 }
 
-func (a *Applier) defaultOf(sub Opcode) (Opcode, bool) {
+func (a *Applier) defaultOf(s *Schema, sub Opcode) (Opcode, bool) {
 	if sub.Op() != All {
 		return 0, false
 	}
 
-	for _, ch := range a.s.prog.Reader().Nodes(sub) {
+	for _, ch := range s.prog.Reader().Nodes(sub) {
 		if ch.Op() == Default {
-			return a.s.prog.code[ch.Off()], true
+			return s.prog.code[ch.Off()], true
 		}
 	}
 
@@ -532,40 +525,36 @@ func (a *Applier) defaultOf(sub Opcode) (Opcode, bool) {
 
 // copyLit lifts a schema-arena literal (a property name or default value) into
 // the data arena.
-func (a *Applier) copyLit(op Opcode) Opcode {
-	return a.b.Writer().CopyFrom(a.s.prog.Reader(), op)
+func (a *Applier) copyLit(s *Schema, op Opcode) Opcode {
+	return a.Buffer.Writer().CopyFrom(s.prog.Reader(), op)
 }
 
-func (a *Applier) checkAdditional(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkAdditional(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
 
-	props, patterns, sub := a.s.additionalParts(op)
+	props, patterns, sub := s.additionalParts(op)
 
 	if !a.rewrite {
-		return val, a.validateAdditional(props, patterns, sub, val, h)
+		return val, a.validateAdditional(s, op, props, patterns, sub, val, h)
 	}
 
-	return a.rewriteAdditional(props, patterns, sub, val, h)
+	return a.rewriteAdditional(s, op, props, patterns, sub, val, h)
 }
 
-func (a *Applier) validateAdditional(props, patterns, sub, val Opcode, h Handler) error {
+func (a *Applier) validateAdditional(s *Schema, op, props, patterns, sub, val Opcode, h Handler) error {
 	voff, vn := val.Off(), val.Arg()
 
 	for i := range vn {
-		key := a.b.code[voff+2*i]
-		v := a.b.code[voff+2*i+1]
+		key := a.Buffer.code[voff+2*i]
+		v := a.Buffer.code[voff+2*i+1]
 
-		if a.covered(props, patterns, key) {
+		if a.covered(s, props, patterns, key) {
 			continue
 		}
 
-		if !a.memberSought(key) {
-			continue
-		}
-
-		if _, err := a.applyChild(sub, v, key, h); err != nil {
+		if _, err := a.applyChild(s, Step{Op: op, Sub: sub, DataKey: key}, v, h); err != nil {
 			return err
 		}
 	}
@@ -573,19 +562,19 @@ func (a *Applier) validateAdditional(props, patterns, sub, val Opcode, h Handler
 	return nil
 }
 
-func (a *Applier) rewriteAdditional(props, patterns, sub, val Opcode, h Handler) (Opcode, error) {
-	mark := len(a.b.tmp)
-	defer func() { a.b.tmp = a.b.tmp[:mark] }()
+func (a *Applier) rewriteAdditional(s *Schema, op, props, patterns, sub, val Opcode, h Handler) (Opcode, error) {
+	mark := len(a.Buffer.tmp)
+	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
 	voff, vn := val.Off(), val.Arg()
 	dirty := false
 
 	for i := range vn {
-		key := a.b.code[voff+2*i]
-		v := a.b.code[voff+2*i+1]
+		key := a.Buffer.code[voff+2*i]
+		v := a.Buffer.code[voff+2*i+1]
 
-		if !a.covered(props, patterns, key) {
-			nv, err := a.applyChild(sub, v, key, h)
+		if !a.covered(s, props, patterns, key) {
+			nv, err := a.applyChild(s, Step{Op: op, Sub: sub, DataKey: key}, v, h)
 			if err != nil {
 				return val, err
 			}
@@ -596,30 +585,30 @@ func (a *Applier) rewriteAdditional(props, patterns, sub, val Opcode, h Handler)
 			}
 		}
 
-		a.b.tmp = append(a.b.tmp, key, v)
+		a.Buffer.tmp = append(a.Buffer.tmp, key, v)
 	}
 
 	if !dirty {
 		return val, nil
 	}
 
-	return a.b.Writer().Object(a.b.tmp[mark:]...), nil
+	return a.Buffer.Writer().Object(a.Buffer.tmp[mark:]...), nil
 }
 
 // covered reports whether key is named in the sibling properties node or matched
 // by one of the sibling patternProperties — either way it is not additional.
-func (a *Applier) covered(props, patterns, key Opcode) bool {
+func (a *Applier) covered(s *Schema, props, patterns, key Opcode) bool {
 	if props.Op() == Properties {
-		if _, ok := a.propSub(props, key); ok {
+		if _, _, ok := a.propSub(s, props, key); ok {
 			return true
 		}
 	}
 
-	return a.patternHit(patterns, key)
+	return a.patternHit(s, patterns, key)
 }
 
 // patternHit reports whether key matches any regex in a patternProperties node.
-func (a *Applier) patternHit(patterns, key Opcode) bool {
+func (a *Applier) patternHit(s *Schema, patterns, key Opcode) bool {
 	if patterns.Op() != PatternProps {
 		return false
 	}
@@ -627,7 +616,7 @@ func (a *Applier) patternHit(patterns, key Opcode) bool {
 	off, n := patterns.Off(), patterns.Arg()
 
 	for i := range n {
-		if a.s.patterns[a.s.prog.code[off+2*i]].Match(a.b.Reader().String(key)) {
+		if s.patterns[s.prog.code[off+2*i]].Match(a.Buffer.Reader().String(key)) {
 			return true
 		}
 	}
@@ -635,36 +624,31 @@ func (a *Applier) patternHit(patterns, key Opcode) bool {
 	return false
 }
 
-func (a *Applier) checkPatternProps(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkPatternProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
 
-	mark := len(a.b.tmp)
-	defer func() { a.b.tmp = a.b.tmp[:mark] }()
+	mark := len(a.Buffer.tmp)
+	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
 	off, n := op.Off(), op.Arg()
 	voff, vn := val.Off(), val.Arg()
 	dirty := false
 
 	for i := range vn {
-		key := a.b.code[voff+2*i]
-		v := a.b.code[voff+2*i+1]
-
-		if !a.memberSought(key) {
-			a.b.tmp = append(a.b.tmp, key, v)
-			continue
-		}
+		key := a.Buffer.code[voff+2*i]
+		v := a.Buffer.code[voff+2*i+1]
 
 		for j := range n {
-			pat := a.s.prog.code[off+2*j]
-			sub := a.s.prog.code[off+2*j+1]
+			pat := s.prog.code[off+2*j]
+			sub := s.prog.code[off+2*j+1]
 
-			if !a.s.patterns[pat].Match(a.b.Reader().String(key)) {
+			if !s.patterns[pat].Match(a.Buffer.Reader().String(key)) {
 				continue
 			}
 
-			nv, err := a.applyChild(sub, v, key, h)
+			nv, err := a.applyChild(s, Step{Op: op, Value: pat, Sub: sub, DataKey: key}, v, h)
 			if err != nil {
 				return val, err
 			}
@@ -675,93 +659,75 @@ func (a *Applier) checkPatternProps(op, val Opcode, h Handler) (Opcode, error) {
 			}
 		}
 
-		a.b.tmp = append(a.b.tmp, key, v)
+		a.Buffer.tmp = append(a.Buffer.tmp, key, v)
 	}
 
 	if !a.rewrite || !dirty {
 		return val, nil
 	}
 
-	return a.b.Writer().Object(a.b.tmp[mark:]...), nil
+	return a.Buffer.Writer().Object(a.Buffer.tmp[mark:]...), nil
 }
 
-func (a *Applier) checkRequired(op, val Opcode) {
-	if a.seeking() != None {
-		return
-	}
-
+func (a *Applier) checkRequired(s *Schema, op, val Opcode) {
 	if val.Op() != Object {
 		return
 	}
 
-	off, n := op.Off(), op.Arg()
-
-	for i := range n {
-		if _, _, ok := a.member(val, a.s.prog.code[off+i]); !ok {
-			a.Fail(MissingRequired, op, val)
+	for _, name := range s.prog.Reader().Nodes(op) {
+		if _, _, ok := a.member(s, val, name); !ok {
+			a.Fail(MissingRequired, name, val)
 		}
 	}
 }
 
-func (a *Applier) checkItems(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkItems(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Array {
 		return val, nil
 	}
 
-	prefix, sub := a.s.itemsParts(op)
+	prefix, sub := s.itemsParts(op)
 
-	return a.eachItem(op, val, Pass, sub, prefix.ArgInt(), val.ArgInt(), h)
+	return a.eachItem(s, op, val, Pass, sub, prefix.ArgInt(), val.ArgInt(), h)
 }
 
-func (a *Applier) checkPrefix(op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkPrefix(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 	if val.Op() != Array {
 		return val, nil
 	}
 
-	return a.eachItem(op, val, op, Pass, 0, op.ArgInt(), h)
+	return a.eachItem(s, op, val, op, Pass, 0, op.ArgInt(), h)
 }
 
 // eachItem applies prefix[i] to item i while i < len(prefix), sub to the rest,
 // over the index range [first, last).
-func (a *Applier) eachItem(op, val, prefix, sub Opcode, first, last int, h Handler) (Opcode, error) {
-	seek := a.seeking()
-
-	switch seek.Op() {
-	case None, Each, IntLit:
-		// ok
-	case Key:
-		a.Fail(InvalidArrayIndex, op, None)
-		return val, nil
-	default:
-		panic(seek.Op())
-	}
-
-	mark := len(a.b.tmp)
-	defer func() { a.b.tmp = a.b.tmp[:mark] }()
+func (a *Applier) eachItem(s *Schema, op, val, prefix, sub Opcode, first, last int, h Handler) (Opcode, error) {
+	mark := len(a.Buffer.tmp)
+	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
 	poff, pn := prefix.OffInt(), prefix.ArgInt()
 	voff, vn := val.OffInt(), val.ArgInt()
 	dirty := false
 
-	target := seek.ImmInt()
-	if target < 0 {
-		target += vn
-	}
-
 	for i := range vn {
-		v := a.b.code[voff+i]
+		v := a.Buffer.code[voff+i]
 
 		sch := sub
 		if i < pn {
-			sch = a.s.prog.code[poff+i]
+			sch = s.prog.code[poff+i]
 		}
 
-		if i < first || i >= last || (seek.Op() == IntLit && i != target) {
-			a.b.tmp = append(a.b.tmp, v)
+		if i < first || i >= last {
+			a.Buffer.tmp = append(a.Buffer.tmp, v)
 			continue
 		}
 
-		nv, err := a.applyChild(sch, v, makeImm(IntLit, i), h)
+		kw, idx := op, None
+		if i < pn {
+			kw, idx = prefix, MakeInt(int64(i))
+		}
+
+		nv, err := a.applyChild(s, Step{Op: kw, Value: idx, Sub: sch, DataKey: MakeInt(int64(i))}, v, h)
 		if err != nil {
 			return val, err
 		}
@@ -770,14 +736,14 @@ func (a *Applier) eachItem(op, val, prefix, sub Opcode, first, last int, h Handl
 			dirty = true
 		}
 
-		a.b.tmp = append(a.b.tmp, nv)
+		a.Buffer.tmp = append(a.Buffer.tmp, nv)
 	}
 
 	if !dirty {
 		return val, nil
 	}
 
-	return a.b.Writer().Array(a.b.tmp[mark:]...), nil
+	return a.Buffer.Writer().Array(a.Buffer.tmp[mark:]...), nil
 }
 
 func (a *Applier) checkUnique(op, val Opcode) {
@@ -789,19 +755,19 @@ func (a *Applier) checkUnique(op, val Opcode) {
 
 	for i := range vn {
 		for j := i + 1; j < vn; j++ {
-			if equalBuf(a.b.Reader(), a.b.code[voff+i], a.b.Reader(), a.b.code[voff+j]) {
-				a.Fail(DuplicateItems, op, val)
+			if equalBuf(a.Buffer.Reader(), a.Buffer.code[voff+i], a.Buffer.Reader(), a.Buffer.code[voff+j]) {
+				a.Fail(DuplicateItems, op, a.Buffer.code[voff+j])
 				return
 			}
 		}
 	}
 }
 
-func (a *Applier) checkEnum(op, val Opcode) {
+func (a *Applier) checkEnum(s *Schema, op, val Opcode) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		if a.equalLit(val, a.s.prog.code[off+i]) {
+		if a.equalLit(s, val, s.prog.code[off+i]) {
 			return
 		}
 	}
@@ -809,11 +775,11 @@ func (a *Applier) checkEnum(op, val Opcode) {
 	a.Fail(MustMatchEnum, op, val)
 }
 
-func (a *Applier) checkAnyOf(op, val Opcode, h Handler) error {
+func (a *Applier) checkAnyOf(s *Schema, op, val Opcode, h Handler) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
-		ok, err := a.matches(a.s.prog.code[off+i], val, h)
+		ok, err := a.matches(s, Step{Op: op, Value: MakeInt(i), Sub: s.prog.code[off+i]}, val, h)
 		if err != nil {
 			return err
 		}
@@ -828,12 +794,12 @@ func (a *Applier) checkAnyOf(op, val Opcode, h Handler) error {
 	return nil
 }
 
-func (a *Applier) checkOneOf(op, val Opcode, h Handler) error {
+func (a *Applier) checkOneOf(s *Schema, op, val Opcode, h Handler) error {
 	off, n := op.Off(), op.Arg()
 	cnt := 0
 
 	for i := range n {
-		ok, err := a.matches(a.s.prog.code[off+i], val, h)
+		ok, err := a.matches(s, Step{Op: op, Value: MakeInt(i), Sub: s.prog.code[off+i]}, val, h)
 		if err != nil {
 			return err
 		}
@@ -843,97 +809,86 @@ func (a *Applier) checkOneOf(op, val Opcode, h Handler) error {
 		}
 	}
 
-	if cnt != 1 {
+	if cnt == 0 {
 		a.Fail(MustMatchOne, op, val)
+	} else if cnt > 1 {
+		a.Fail(MustMatchOnlyOne, op, val)
 	}
 
 	return nil
 }
 
-func (a *Applier) checkCond(op, val Opcode, h Handler) (Opcode, error) {
-	cond, then, els := a.s.condParts(op)
+func (a *Applier) checkCond(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	cond, then, els := s.condParts(op)
 
-	ok, err := a.matches(cond, val, h)
+	ok, err := a.matches(s, Step{Op: op, Value: If, Sub: cond}, val, h)
 	if err != nil {
 		return val, err
 	}
 
 	if ok {
-		return a.apply(then, val, h)
+		return a.applyChild(s, Step{Op: op, Value: Then, Sub: then}, val, h)
 	}
 
-	return a.apply(els, val, h)
+	return a.applyChild(s, Step{Op: op, Value: Else, Sub: els}, val, h)
 }
 
 // matches calls apply, but drops diag messages.
-func (a *Applier) matches(op, val Opcode, h Handler) (bool, error) {
-	n := len(a.diag)
-	defer func() { a.diag = a.diag[:n] }()
+// matches runs a trial branch: it reports whether the subschema held and drops
+// whatever it had to say either way. A caller that wants those diagnostics reads
+// them as they appear — through a handler — because by the time this returns they
+// are gone.
+func (a *Applier) matches(s *Schema, st Step, val Opcode, h Handler) (bool, error) {
+	n := len(a.Diags)
+	defer func() { a.Diags = a.Diags[:n] }()
 
-	if _, err := a.apply(op, val, h); err != nil {
+	if _, err := a.applyChild(s, st, val, h); err != nil {
 		return false, err
 	}
 
-	return len(a.diag) == n, nil
+	return len(a.Diags) == n, nil
 }
 
-func (a *Applier) member(obj, key Opcode) (k, v Opcode, ok bool) {
+func (a *Applier) member(s *Schema, obj, key Opcode) (k, v Opcode, ok bool) {
 	voff, vn := obj.Off(), obj.Arg()
 
 	for i := range vn {
-		if a.keyEq(a.b.code[voff+2*i], key) {
-			return a.b.code[voff+2*i], a.b.code[voff+2*i+1], true
+		if a.keyEq(s, a.Buffer.code[voff+2*i], key) {
+			return a.Buffer.code[voff+2*i], a.Buffer.code[voff+2*i+1], true
 		}
 	}
 
 	return 0, 0, false
 }
 
-func (a *Applier) keyEq(data, schema Opcode) bool {
-	return bytes.Equal(a.b.Reader().Span(data), a.s.prog.Reader().Span(schema))
+func (a *Applier) keyEq(s *Schema, data, schema Opcode) bool {
+	return bytes.Equal(a.Buffer.Reader().Span(data), s.prog.Reader().Span(schema))
 }
 
-func (a *Applier) idEq(id, schema Opcode) bool {
-	return bytes.Equal(a.b.Reader().Span(id), a.s.prog.Reader().String(schema))
-}
-
-func (a *Applier) memberSought(key Opcode) bool {
-	seek := a.seeking()
-
-	switch seek.Op() {
-	case None, Each:
-		return true
-	case Key:
-		return bytes.Equal(a.b.Reader().Span(seek), a.b.Reader().String(key))
-	default:
-		return false
-	}
-}
-
-func (a *Applier) equalLit(val, lit Opcode) bool {
-	return equalBuf(a.b.Reader(), val, a.s.prog.Reader(), lit)
+func (a *Applier) equalLit(s *Schema, val, lit Opcode) bool {
+	return equalBuf(a.Buffer.Reader(), val, s.prog.Reader(), lit)
 }
 
 func (a *Applier) number(val Opcode) float64 {
-	v, _ := a.b.Reader().Float(val)
+	v, _ := a.Buffer.Reader().Float(val)
 	return v
 }
 
-func (a *Applier) schemaNum(op Opcode) float64 {
-	lit := a.s.prog.code[op.Off()]
-	v, _ := json2.Value(a.s.prog.Reader().Span(lit)).Float64()
+func (a *Applier) schemaNum(s *Schema, op Opcode) float64 {
+	lit := s.prog.code[op.Off()]
+	v, _ := json2.Value(s.prog.Reader().Span(lit)).Float64()
 	return v
 }
 
-func (a *Applier) multipleOf(op, val Opcode) bool {
-	lit := a.s.prog.code[op.Off()]
-	div := a.s.prog.Reader().Span(lit)
+func (a *Applier) multipleOf(s *Schema, op, val Opcode) bool {
+	lit := s.prog.code[op.Off()]
+	div := s.prog.Reader().Span(lit)
 
 	var ok, exact bool
 
 	switch val.Op() {
 	case Number:
-		ok, exact = isMultiple(a.b.Reader().Span(val), div)
+		ok, exact = isMultiple(a.Buffer.Reader().Span(val), div)
 	case IntLit:
 		if md, sd, good := parseDecimal(div); good {
 			ok, exact = isMultipleDec(magnitude(val.Imm()), 0, md, sd)
@@ -948,7 +903,7 @@ func (a *Applier) multipleOf(op, val Opcode) bool {
 		return ok
 	}
 
-	m := a.schemaNum(op)
+	m := a.schemaNum(s, op)
 	return m == 0 || math.Mod(a.number(val), m) == 0
 }
 
@@ -958,47 +913,32 @@ func (a *Applier) integral(val Opcode) bool {
 }
 
 func (a *Applier) strlen(val Opcode) int64 {
-	return int64(utf8.RuneCount(a.b.Reader().Span(val)))
+	return int64(utf8.RuneCount(a.Buffer.Reader().Span(val)))
 }
 
 func (a *Applier) Fail(code DiagCode, op, val Opcode) {
-	off, end, _ := a.b.Reader().Source(val)
-	a.diag = append(a.diag, Diag{Code: code, Op: op.Op(), Off: off, End: end})
+	off, end, _ := a.Buffer.Reader().Source(val)
+	d := Diag{Code: code, Op: op, Off: off, End: end}
+
+	if a.save {
+		d.Steps = append([]Step(nil), a.Steps...)
+	}
+
+	a.Diags = append(a.Diags, d)
 }
 
-func (a *Applier) seeking() Opcode {
-	if len(a.dpath) < len(a.at) {
-		return a.at[len(a.dpath)]
-	}
+func (a *Applier) reset(s *Schema, rewrite bool) {
+	a.Buffer.Reset()
 
-	return None
-}
-
-func (a *Applier) reset(s *Schema, rewrite bool) *Applier {
-	a.s = s
-	a.b.Reset()
-
-	if a.diag == nil {
-		a.diag = a.dbuf[:]
-	}
-	if a.spath == nil {
-		a.spath = a.opbuf[:8:8]
-	}
-	if a.dpath == nil {
-		a.dpath = a.opbuf[8:16:16]
-	}
-	if a.at == nil {
-		a.at = a.opbuf[16:]
+	if a.Diags == nil {
+		a.Diags = a.dbuf[:]
 	}
 
 	a.rewrite = rewrite
-	a.from = None
-	a.diag = a.diag[:0]
-	a.spath = a.spath[:0]
-	a.dpath = a.dpath[:0]
-	a.at = a.at[:0]
-
-	return a
+	a.save = s.Flags.Is(SaveSteps)
+	a.Diags = a.Diags[:0]
+	a.Steps = a.Steps[:0]
+	a.Depth = 0
 }
 
 // magnitude is |v| as unsigned, exact for math.MinInt64 too.
