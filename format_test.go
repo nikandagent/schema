@@ -251,7 +251,7 @@ func TestFormatKeyword(tb *testing.T) {
 		tb.Errorf("x-ext: got %s", got)
 	}
 
-	if got := string(s.FormatKeyword(nil, Fail)); got != `false` {
+	if got := string(s.FormatKeyword(nil, Node{op: Fail})); got != `false` {
 		tb.Errorf("Fail: got %s", got)
 	}
 }
@@ -279,12 +279,12 @@ func TestKeywordEntry(tb *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		op   Opcode
+		op   Node
 	}{
 		{"required entry", entry},
-		{"Pass", Pass},
-		{"Fail", Fail},
-		{"None", None},
+		{"Pass", Node{op: Pass}},
+		{"Fail", Node{op: Fail}},
+		{"None", Node{}},
 	} {
 		func() {
 			defer func() {
@@ -297,5 +297,31 @@ func TestKeywordEntry(tb *testing.T) {
 				tb.Errorf("Keyword(%s): got %q, want \"\"", tc.name, got)
 			}
 		}()
+	}
+}
+
+// TestFormatUncompiled pins the documented panic: Format reads the compiled
+// program, so there must be one.
+func TestFormatUncompiled(tb *testing.T) {
+	var zero Schema
+
+	mustPanic(tb, "Format(zero Schema)", func() { zero.Format(nil) })
+
+	var failed Schema
+
+	if err := failed.Compile([]byte(`{"minLength":"x"}`)); err == nil {
+		tb.Fatalf("compile: want error")
+	}
+
+	mustPanic(tb, "Format(failed Compile)", func() { failed.Format(nil) })
+
+	// a compiled one is fine, and stays fine after a failed recompile attempt
+	ok, err := Compile([]byte(`{"type":"string"}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	if got := string(ok.Format(nil)); got != `{"type":"string"}` {
+		tb.Errorf("format: got %s", got)
 	}
 }

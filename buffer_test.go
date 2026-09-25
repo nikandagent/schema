@@ -106,12 +106,13 @@ func TestReuse(tb *testing.T) {
 
 // TestSource covers the split between a node's bytes and its origin: decoded
 // nodes report their span in src, synthesized ones report no source at all.
+// Whatever the kind, src[off:end] is the token as written — quotes included.
 func TestSource(tb *testing.T) {
 	var b Buffer
 
 	b.Reset()
 
-	src := []byte(`{"a":[1,"x",null]}`)
+	src := []byte(`["",{"a":[1,"x",null,true,false,-1.5e3,{"k":1},["z"]]},"a\"b"]`)
 
 	root, err := b.decode(src)
 	if err != nil {
@@ -120,29 +121,63 @@ func TestSource(tb *testing.T) {
 
 	r, w := b.Reader(), b.Writer()
 
+	top := r.Nodes(root)
+	obj := r.Nodes(top[1])
+	arr := r.Nodes(obj[1])
+
 	for _, tc := range []struct {
-		op   Opcode
-		span string
+		op    Node
+		token string
 	}{
-		{root, `{"a":[1,"x",null]}`},
-		{r.Nodes(root)[0], `a`},
-		{r.Nodes(root)[1], `[1,"x",null]`},
-		{r.Nodes(r.Nodes(root)[1])[0], `1`},
-		{r.Nodes(r.Nodes(root)[1])[2], `null`},
+		{root, string(src)},
+		{top[0], `""`},
+		{obj[0], `"a"`},
+		{obj[1], `[1,"x",null,true,false,-1.5e3,{"k":1},["z"]]`},
+		{arr[0], `1`},
+		{arr[1], `"x"`},
+		{arr[2], `null`},
+		{arr[3], `true`},
+		{arr[4], `false`},
+		{arr[5], `-1.5e3`},
+		{arr[6], `{"k":1}`},
+		{arr[7], `["z"]`},
 	} {
-		off, end, ok := r.Source(tc.op)
-		if !ok || string(src[off:end]) != tc.span {
-			tb.Errorf("source of %v: %d:%d ok=%v, want %q", tc.op.Op(), off, end, ok, tc.span)
+		off, end, ok := tc.op.Src()
+		if !ok || string(src[off:end]) != tc.token {
+			tb.Errorf("source of %v: %d:%d ok=%v %q, want %q", tc.op.Op(), off, end, ok, src[off:end], tc.token)
 		}
+	}
+
+	// an empty string at the very start of a document spans its two quotes, which
+	// is not the (0,0) that means "no source position"
+	{
+		var q Buffer
+
+		q.Reset()
+
+		root, err := q.decode([]byte(`""`))
+		if err != nil {
+			tb.Fatalf("decode: %v", err)
+		}
+
+		if off, end, ok := root.Src(); !ok || off != 0 || end != 2 {
+			tb.Errorf("source of a lone empty string: %d:%d ok=%v, want 0:2 true", off, end, ok)
+		}
+	}
+
+	// a string that had escapes was decoded into the text tail and still knows
+	// which token it came from
+	if off, end, ok := top[2].Src(); !ok || string(src[off:end]) != `"a\"b"` {
+		tb.Errorf("source of an escaped string: %d:%d ok=%v %q, want the token", off, end, ok, src[off:end])
 	}
 
 	// Bare Bool/Null words are absent here on purpose: they carry no span, so they
 	// read as position 0 and are indistinguishable from decoded ones.
-	for _, op := range []Opcode{
+	for _, op := range []Node{
 		w.Int(5), w.Float(1.5), w.String("x"),
-		w.Array(w.Int(1)), w.Object(w.String("k"), w.Int(1)), None,
+		w.Array(w.Int(1)), w.Object(w.String("k"), w.Int(1)), Node{},
 	} {
-		if off, end, ok := r.Source(op); ok {
+		if off, end, ok := op.Src(); ok {
 			tb.Errorf("source of synthesized %v: %d:%d ok=true, want no source", op.Op(), off, end)
 		}
 	}
@@ -174,17 +209,17 @@ func TestSourceEscaped(tb *testing.T) {
 	r := b.Reader()
 	plain, esc := r.Nodes(root)[0], r.Nodes(root)[1]
 
-	off, end, ok := r.Source(plain)
-	if !ok || string(src[off:end]) != "ab" {
-		tb.Errorf("source of plain string: %d:%d ok=%v, want the bare body", off, end, ok)
+	off, end, ok := plain.Src()
+	if !ok || string(src[off:end]) != `"ab"` {
+		tb.Errorf("source of plain string: %d:%d ok=%v, want the token", off, end, ok)
 	}
 
-	// decoding moved it to the text tail, so it kept its value but lost its place
-	if off, end, ok := r.Source(esc); ok {
-		tb.Errorf("source of escaped string: %d:%d ok=true, want no source", off, end)
+	// decoding moved it to the text tail, and it still points at its token
+	if off, end, ok := esc.Src(); !ok || string(src[off:end]) != `"a\u0062"` {
+		tb.Errorf("source of escaped string: %d:%d ok=%v %q, want the token", off, end, ok, src[off:end])
 	}
 
-	for _, op := range []Opcode{plain, esc} {
+	for _, op := range []Node{plain, esc} {
 		if got := string(r.String(op)); got != "ab" {
 			tb.Errorf("string: got %q, want %q", got, "ab")
 		}

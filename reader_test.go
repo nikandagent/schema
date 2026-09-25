@@ -1,6 +1,10 @@
 package schema
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+)
 
 func mustPanic(tb *testing.T, name string, f func()) {
 	tb.Helper()
@@ -51,10 +55,10 @@ func TestBufferNodesAt(tb *testing.T) {
 		tb.Errorf("ext value: got %q, want %q", got, "custom")
 	}
 
-	if k, v := b.NodesAt(ext, 1); k != None || v != None {
+	if k, v := b.NodesAt(ext, 1); k.Op() != None || v.Op() != None {
 		tb.Errorf("ext at 1: got %v/%v, want None/None", k, v)
 	}
-	if k, v := b.NodesAt(ext, -2); k != None || v != None {
+	if k, v := b.NodesAt(ext, -2); k.Op() != None || v.Op() != None {
 		tb.Errorf("ext at -2: got %v/%v, want None/None", k, v)
 	}
 
@@ -95,7 +99,7 @@ func TestBufferExt(tb *testing.T) {
 		tb.Errorf("ext x-type: got %q, want %q", b.String(v), "custom")
 	}
 
-	if v := b.Ext(s.Root(), "x-missing"); v != None {
+	if v := b.Ext(s.Root(), "x-missing"); v.Op() != None {
 		tb.Errorf("ext x-missing: got %v, want None", v)
 	}
 
@@ -119,7 +123,7 @@ func TestBufferRaw(tb *testing.T) {
 		tb.Errorf("raw description: got %q, want %q", b.String(v), "D")
 	}
 
-	if v := b.Raw(s.Root(), "format"); v != None {
+	if v := b.Raw(s.Root(), "format"); v.Op() != None {
 		tb.Errorf("raw format: got %v, want None", v)
 	}
 
@@ -142,7 +146,7 @@ func TestBufferRaw(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	if v := n.Reader().Raw(n.Root(), "title"); v != None {
+	if v := n.Reader().Raw(n.Root(), "title"); v.Op() != None {
 		tb.Errorf("raw title with no annotations: got %v, want None", v)
 	}
 
@@ -153,11 +157,11 @@ func TestBufferRaw(tb *testing.T) {
 
 	xb := x.Reader()
 
-	if v := xb.Raw(x.Root(), "x-type"); v != None {
+	if v := xb.Raw(x.Root(), "x-type"); v.Op() != None {
 		tb.Errorf("raw x-type: got %v, want None", v)
 	}
 
-	if v := xb.Ext(x.Root(), "title"); v != None {
+	if v := xb.Ext(x.Root(), "title"); v.Op() != None {
 		tb.Errorf("ext title: got %v, want None", v)
 	}
 
@@ -201,7 +205,7 @@ func TestBufferKeyword(tb *testing.T) {
 		tb.Errorf("keyword Type: got %v", op.Op())
 	}
 
-	if op := b.Keyword(s.Root(), Minimum); op != None {
+	if op := b.Keyword(s.Root(), Minimum); op.Op() != None {
 		tb.Errorf("keyword Minimum: got %v, want None", op)
 	}
 
@@ -219,7 +223,7 @@ func TestBufferFind(tb *testing.T) {
 	props := b.Keyword(s.Root(), Properties)
 
 	for _, tc := range []struct {
-		block Opcode
+		block Node
 		key   string
 		want  Types
 	}{
@@ -232,7 +236,7 @@ func TestBufferFind(tb *testing.T) {
 		{b.Keyword(s.Root(), Defs), "a/b", TypeObject},
 	} {
 		sub := b.Find(tc.block, tc.key)
-		if sub == None {
+		if sub.Op() == None {
 			tb.Errorf("find %q: None", tc.key)
 			continue
 		}
@@ -243,7 +247,7 @@ func TestBufferFind(tb *testing.T) {
 	}
 
 	for _, key := range []string{"z", "A", "b", "^y", " "} {
-		if v := b.Find(props, key); v != None {
+		if v := b.Find(props, key); v.Op() != None {
 			tb.Errorf("find missing %q: got %v, want None", key, v)
 		}
 	}
@@ -255,7 +259,7 @@ func TestBufferFind(tb *testing.T) {
 
 	eb := e.Reader()
 
-	if v := eb.Find(eb.Keyword(e.Root(), Properties), "café"); v == None {
+	if v := eb.Find(eb.Keyword(e.Root(), Properties), "café"); v.Op() == None {
 		tb.Errorf("find escaped property name: None")
 	}
 
@@ -281,7 +285,7 @@ func TestBufferFind(tb *testing.T) {
 		{"esca", "5"},
 	} {
 		v := r.Find(obj, tc.key)
-		if v == None {
+		if v.Op() == None {
 			tb.Errorf("find data %q: None", tc.key)
 			continue
 		}
@@ -292,7 +296,7 @@ func TestBufferFind(tb *testing.T) {
 	}
 
 	for _, key := range []string{"z", "A", "b", "caf", "esc"} {
-		if v := r.Find(obj, key); v != None {
+		if v := r.Find(obj, key); v.Op() != None {
 			tb.Errorf("find missing data %q: got %v, want None", key, v)
 		}
 	}
@@ -302,7 +306,7 @@ func TestBufferFind(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	if v := r.Find(esc, "café"); v == None {
+	if v := r.Find(esc, "café"); v.Op() == None {
 		tb.Errorf("find escaped data key: None")
 	}
 
@@ -354,8 +358,8 @@ func TestBufferIter(tb *testing.T) {
 
 	n := 0
 	for k := range b.Iter(b.Keyword(s.Root(), AllOf)) {
-		if k.ImmInt() != n {
-			tb.Errorf("allOf index: got %d, want %d", k.ImmInt(), n)
+		if k.Int() != int64(n) {
+			tb.Errorf("allOf index: got %d, want %d", k.Int(), n)
 		}
 		n++
 	}
@@ -366,7 +370,7 @@ func TestBufferIter(tb *testing.T) {
 	n = 0
 	for k := range b.Iter(b.Keyword(s.Root(), Not)) {
 		n++
-		if k != None {
+		if k.Op() != None {
 			tb.Errorf("not key: got %v, want None", k)
 		}
 	}
@@ -377,7 +381,7 @@ func TestBufferIter(tb *testing.T) {
 	n = 0
 	for k, v := range b.Iter(b.Keyword(s.Root(), Additional)) {
 		n++
-		if k != None || v.Op() != All {
+		if k.Op() != None || v.Op() != All {
 			tb.Errorf("additional: got %v/%v, want None/All", k, v.Op())
 		}
 	}
@@ -402,7 +406,7 @@ func TestBufferIter(tb *testing.T) {
 		for k, v := range cb.Iter(cb.Keyword(c.Root(), kw)) {
 			n++
 
-			if k != None || v.Op() != All {
+			if k.Op() != None || v.Op() != All {
 				tb.Errorf("%v: got %v/%v, want None/All", kw, k, v.Op())
 			}
 		}
@@ -425,8 +429,8 @@ func TestBufferIter(tb *testing.T) {
 
 	n = 0
 	for k, v := range pb.Iter(pb.Keyword(p.Root(), Prefix)) {
-		if k.ImmInt() != n || v.Op() != All {
-			tb.Errorf("prefixItems %d: got %v/%v, want %d/All", n, k, v.Op(), n)
+		if k.Int() != int64(n) || v.Op() != All {
+			tb.Errorf("prefixItems %d: got %d/%v, want %d/All", n, k.Int(), v.Op(), n)
 		}
 		n++
 	}
@@ -471,7 +475,7 @@ func TestBufferString(tb *testing.T) {
 		b := s.Reader()
 
 		op := b.Keyword(s.Root(), tc.kw)
-		if op == None {
+		if op.Op() == None {
 			tb.Errorf("string %q: no %v keyword", tc.in, tc.kw)
 			continue
 		}
@@ -491,15 +495,16 @@ func TestBufferString(tb *testing.T) {
 		tb.Errorf("string String: got %q, want %q", got, `a"b`)
 	}
 
-	// a Key is the bytes At was given, verbatim
-	for _, in := range []string{`key`, `a\u0062`, `a\z`} {
-		op := w.Span(Key, []byte(in))
+	// a written String holds the bytes it was given, verbatim: String and Span
+	// are the same view of it, with nothing left to decode
+	for _, in := range []string{`key`, `a\u0062`, `a\z`, ``} {
+		op := w.Span(String, []byte(in))
 
 		if got := string(r.String(op)); got != in {
-			tb.Errorf("string Key %q: got %q", in, got)
+			tb.Errorf("string String %q: got %q", in, got)
 		}
 		if got := string(r.Span(op)); got != in {
-			tb.Errorf("span Key %q: got %q", in, got)
+			tb.Errorf("span String %q: got %q", in, got)
 		}
 	}
 
@@ -517,7 +522,7 @@ func TestAppendPointer(tb *testing.T) {
 
 	key := func(s string) Step { return Step{DataKey: w.Span(String, []byte(s))} }
 	idx := func(i int) Step { return Step{DataKey: MakeInt(int64(i))} }
-	skip := Step{DataKey: None}
+	skip := Step{}
 
 	for _, tc := range []struct {
 		steps []Step
@@ -591,4 +596,311 @@ func TestBufferDeref(tb *testing.T) {
 
 	mustPanic(tb, "Deref(Properties)", func() { b.Deref(b.Keyword(s.Root(), Properties)) })
 	mustPanic(tb, "Deref(Type)", func() { b.Deref(b.Keyword(s.Root(), Type)) })
+}
+
+// TestNodeSrc pins that every node in a compiled program knows the schema text
+// it came from: a keyword node spans its whole "key": value pair, a schema
+// object its braces.
+func TestNodeSrc(tb *testing.T) {
+	src := `{"$ref":"#/$defs/T","$defs":{"T":{"type":"string","pattern":"^a\u0062c$"}},"minLength":3}`
+
+	s, err := Compile([]byte(src))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := s.Reader()
+	defs := r.Keyword(s.Root(), Defs)
+	sub := r.Find(defs, "T")
+	key, _ := r.NodesAt(defs, 0)
+
+	for _, tc := range []struct {
+		name string
+		op   Node
+		want string
+	}{
+		{"root", s.Root(), src},
+		{"$ref", r.Keyword(s.Root(), Ref), `"$ref":"#/$defs/T"`},
+		{"minLength", r.Keyword(s.Root(), MinLen), `"minLength":3`},
+		{"$defs", defs, `"$defs":{"T":{"type":"string","pattern":"^a\u0062c$"}}`},
+		{"defs key", key, `"T"`},
+		{"defs subschema", sub, `{"type":"string","pattern":"^a\u0062c$"}`},
+		{"type", r.Keyword(sub, Type), `"type":"string"`},
+		// an escaped pattern keeps its place: the span is the token as written
+		{"pattern", r.Keyword(sub, Pattern), `"pattern":"^a\u0062c$"`},
+	} {
+		off, end, ok := tc.op.Src()
+		if !ok || src[off:end] != tc.want {
+			tb.Errorf("%s: src %d:%d ok=%v %q, want %q", tc.name, off, end, ok, src[off:end], tc.want)
+		}
+	}
+
+	if got := string(r.String(r.Keyword(sub, Pattern))); got != "^abc$" {
+		tb.Errorf("pattern value: got %q, want %q", got, "^abc$")
+	}
+
+	var b Buffer
+
+	b.Reset()
+
+	w := b.Writer()
+
+	for _, op := range []Node{w.String("x"), w.Int(5), w.Float(1.5), w.Bool(true), w.Null(), {}} {
+		if off, end, ok := op.Src(); ok {
+			tb.Errorf("src of synthesized %v: %d:%d ok=true, want none", op.Op(), off, end)
+		}
+	}
+}
+
+// TestDiagInSchema locates a validation finding in the schema text, not only in
+// the document: the keyword node the Diag carries knows where it was written.
+func TestDiagInSchema(tb *testing.T) {
+	src := `{"properties":{"n":{"minLength":3},"s":{"type":"integer"}}}`
+
+	s, err := Compile([]byte(src))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	d, err := validate(s, []byte(`{"n":"ab","s":"x"}`))
+	if err != nil || len(d) != 2 {
+		tb.Fatalf("diags=%v err=%v, want 2", d, err)
+	}
+
+	want := map[DiagCode]string{
+		TooShort:     `"minLength":3`,
+		TypeMismatch: `"type":"integer"`,
+	}
+
+	for _, x := range d {
+		off, end, ok := x.Op.Src()
+		if !ok {
+			tb.Errorf("%v: the keyword has no place in the schema", x.Code)
+			continue
+		}
+
+		if got := src[off:end]; got != want[x.Code] {
+			tb.Errorf("%v: schema span %q, want %q", x.Code, got, want[x.Code])
+		}
+	}
+}
+
+// TestLiteralExact pins that a literal node carries the number the caller wrote,
+// to the last bit — the packed-into-the-opcode form used to round it.
+func TestLiteralExact(tb *testing.T) {
+	for _, v := range []int64{0, 1, -1, 1 << 30, 1 << 62, -1 << 62, 1<<63 - 1, -1 << 63, 1 << 56} {
+		n := MakeInt(v)
+
+		if n.Op() != IntLit || n.Int() != v {
+			tb.Errorf("MakeInt(%d): op=%v Int=%d", v, n.Op(), n.Int())
+		}
+	}
+
+	for _, v := range []float64{0, 0.1, -0.1, 1.5, 1e300, 1e-300, 1.0 / 3, math.Pi, math.MaxFloat64, math.SmallestNonzeroFloat64} {
+		n := MakeFlt(v)
+
+		if n.Op() != FltLit || n.Flt() != v {
+			tb.Errorf("MakeFlt(%v): op=%v Flt=%v", v, n.Op(), n.Flt())
+		}
+	}
+
+	if n := MakeFlt(math.NaN()); !math.IsNaN(n.Flt()) {
+		tb.Errorf("MakeFlt(NaN): %v", n.Flt())
+	}
+
+	// the spellings the 56-bit packing used to lose
+	for _, v := range []float64{0.1, 1.0 / 3, math.Pi} {
+		if got := strconv.FormatFloat(MakeFlt(v).Flt(), 'g', -1, 64); got != strconv.FormatFloat(v, 'g', -1, 64) {
+			tb.Errorf("MakeFlt(%v) formats as %s", v, got)
+		}
+	}
+
+	// a literal spends meta on its value, so it has no source position
+	if _, _, ok := MakeInt(5).Src(); ok {
+		tb.Errorf("MakeInt(5).Src(): ok=true")
+	}
+	if _, _, ok := MakeFlt(1.5).Src(); ok {
+		tb.Errorf("MakeFlt(1.5).Src(): ok=true")
+	}
+}
+
+// TestNodeZero pins the zero Node as the absent one: None, no source, no value,
+// and what every lookup returns when it finds nothing.
+func TestNodeZero(tb *testing.T) {
+	var zero Node
+
+	if zero.Op() != None {
+		tb.Errorf("Node{}.Op() = %v, want None", zero.Op())
+	}
+
+	if _, _, ok := zero.Src(); ok {
+		tb.Errorf("Node{}.Src(): ok=true")
+	}
+
+	if zero.Keyword() != "" {
+		tb.Errorf("Node{}.Keyword() = %q", zero.Keyword())
+	}
+
+	if TypesOf(zero) != 0 {
+		tb.Errorf("TypesOf(Node{}) = %v, want the empty set", TypesOf(zero))
+	}
+
+	s, err := Compile([]byte(`{"type":"string","properties":{"a":{}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := s.Reader()
+
+	for _, tc := range []struct {
+		name string
+		op   Node
+	}{
+		{"Keyword(missing)", r.Keyword(s.Root(), Minimum)},
+		{"Raw(missing)", r.Raw(s.Root(), "title")},
+		{"Ext(missing)", r.Ext(s.Root(), "x-none")},
+		{"Find(missing)", r.Find(r.Keyword(s.Root(), Properties), "zz")},
+	} {
+		if tc.op != zero {
+			tb.Errorf("%s: got %+v, want the zero Node", tc.name, tc.op)
+		}
+	}
+}
+
+// TestBufferParts unfolds the three keyword families the compiler links into one
+// node: each splitter takes the folded node and hands back the siblings, Pass
+// where a sibling was not written.
+func TestBufferParts(tb *testing.T) {
+	s, err := Compile([]byte(`{
+		"properties":{"a":{"type":"integer"}},
+		"patternProperties":{"^x":{"type":"string"}},
+		"additionalProperties":false,
+		"prefixItems":[{"type":"integer"}],
+		"items":{"type":"string"},
+		"if":{"type":"object"},"then":{"minProperties":1},"else":{"maxLength":3}
+	}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	r := s.Reader()
+
+	props, patterns, sub := r.PropertiesParts(r.Keyword(s.Root(), Additional))
+
+	for _, tc := range []struct {
+		name string
+		op   Node
+		want string
+	}{
+		{"properties", props, `{"a":{"type":"integer"}}`},
+		{"patternProperties", patterns, `{"^x":{"type":"string"}}`},
+		{"additional sub", sub, `false`},
+	} {
+		if got := string(s.FormatKeyword(nil, tc.op)); got != tc.want {
+			tb.Errorf("PropertiesParts %s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	if props.Op() != Properties || patterns.Op() != PatternProps || sub.Op() != Fail {
+		tb.Errorf("PropertiesParts kinds: %v/%v/%v", props.Op(), patterns.Op(), sub.Op())
+	}
+
+	prefix, tail := r.ItemsParts(r.Keyword(s.Root(), Items))
+
+	if got := string(s.FormatKeyword(nil, prefix)); got != `[{"type":"integer"}]` {
+		tb.Errorf("ItemsParts prefix: got %s", got)
+	}
+	if got := string(s.FormatNode(nil, tail)); got != `{"type":"string"}` {
+		tb.Errorf("ItemsParts sub: got %s", got)
+	}
+
+	cond, then, els := r.CondParts(r.Keyword(s.Root(), If))
+
+	for _, tc := range []struct {
+		name string
+		op   Node
+		want string
+	}{
+		{"if", cond, `{"type":"object"}`},
+		{"then", then, `{"minProperties":1}`},
+		{"else", els, `{"maxLength":3}`},
+	} {
+		if got := string(s.FormatNode(nil, tc.op)); got != tc.want {
+			tb.Errorf("CondParts %s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	// a sibling that was not written comes back as Pass
+	lone, err := Compile([]byte(`{"additionalProperties":{"type":"integer"},"items":{"type":"string"},"if":{"type":"object"}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	lr := lone.Reader()
+
+	props, patterns, sub = lr.PropertiesParts(lr.Keyword(lone.Root(), Additional))
+	if props.Op() != Pass || patterns.Op() != Pass || sub.Op() != All {
+		tb.Errorf("lone PropertiesParts: %v/%v/%v, want Pass/Pass/All", props.Op(), patterns.Op(), sub.Op())
+	}
+
+	prefix, tail = lr.ItemsParts(lr.Keyword(lone.Root(), Items))
+	if prefix.Op() != Pass || tail.Op() != All {
+		tb.Errorf("lone ItemsParts: %v/%v, want Pass/All", prefix.Op(), tail.Op())
+	}
+
+	cond, then, els = lr.CondParts(lr.Keyword(lone.Root(), If))
+	if cond.Op() != All || then.Op() != Pass || els.Op() != Pass {
+		tb.Errorf("lone CondParts: %v/%v/%v, want All/Pass/Pass", cond.Op(), then.Op(), els.Op())
+	}
+}
+
+// TestSourceIntern pins that a value keeps its place in the input whether the
+// arena borrowed the bytes or interned a copy of them — the two paths a document
+// reaches a Buffer by.
+func TestSourceIntern(tb *testing.T) {
+	src := []byte(`{"n":12345,"f":-1.5e3,"s":"ab","t":true,"f2":false,"z":null}`)
+
+	var borrow, intern Buffer
+
+	borrow.Reset()
+	intern.Reset()
+
+	brt, err := borrow.decode(src)
+	if err != nil {
+		tb.Fatalf("decode: %v", err)
+	}
+
+	irt, err := intern.Writer().FromJSON(src)
+	if err != nil {
+		tb.Fatalf("fromjson: %v", err)
+	}
+
+	bn, in := borrow.Reader().Nodes(brt), intern.Reader().Nodes(irt)
+
+	if len(bn) != len(in) {
+		tb.Fatalf("nodes: %d vs %d", len(bn), len(in))
+	}
+
+	for i := range bn {
+		boff, bend, bok := bn[i].Src()
+		ioff, iend, iok := in[i].Src()
+
+		if !bok || !iok || boff != ioff || bend != iend {
+			tb.Errorf("node %d (%v): borrowed %d:%d ok=%v, interned %d:%d ok=%v",
+				i, bn[i].Op(), boff, bend, bok, ioff, iend, iok)
+			continue
+		}
+
+		if bn[i].Op() != in[i].Op() {
+			tb.Errorf("node %d: kinds %v vs %v", i, bn[i].Op(), in[i].Op())
+		}
+	}
+
+	// and the spans really are the tokens
+	for i, want := range []string{`"n"`, `12345`, `"f"`, `-1.5e3`, `"s"`, `"ab"`, `"t"`, `true`, `"f2"`, `false`, `"z"`, `null`} {
+		off, end, ok := in[i].Src()
+		if !ok || string(src[off:end]) != want {
+			tb.Errorf("interned node %d: %d:%d ok=%v %q, want %q", i, off, end, ok, src[off:end], want)
+		}
+	}
 }

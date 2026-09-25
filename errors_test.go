@@ -68,8 +68,12 @@ func TestError(tb *testing.T) {
 		if len(d) != 1 {
 			tb.Fatalf(`$ref missing: err %v is not Diagnostics`, err)
 		}
-		if !(d[0].Off > 0 && d[0].End-d[0].Off == len("#/$defs/missing")) {
-			tb.Errorf(`$ref missing: Off=%d End=%d, want Off>0 len=%d`, d[0].Off, d[0].End, len("#/$defs/missing"))
+		// a keyword node spans its whole "key": value pair
+		src := `{"$ref":"#/$defs/missing"}`
+		off, end := d[0].opSpan()
+
+		if got := src[off:end]; got != `"$ref":"#/$defs/missing"` {
+			tb.Errorf(`$ref missing: span %d:%d %q, want the keyword pair`, off, end, got)
 		}
 	}
 	{
@@ -80,8 +84,11 @@ func TestError(tb *testing.T) {
 		if len(d) != 1 {
 			tb.Fatalf(`minLength: err %v is not Diagnostics`, err)
 		}
-		if !(d[0].Off > 0 && d[0].End > d[0].Off) {
-			tb.Errorf(`minLength: Off=%d End=%d, want Off>0 End>Off`, d[0].Off, d[0].End)
+		src := `{"minLength":"x"}`
+		off, end := d[0].opSpan()
+
+		if got := src[off:end]; got != `"minLength":"x"` {
+			tb.Errorf(`minLength: span %d:%d %q, want the keyword pair`, off, end, got)
 		}
 		if d[0].Op.Op() != MinLen {
 			tb.Errorf(`minLength: Op=%v, want MinLen`, d[0].Op.Op())
@@ -194,6 +201,24 @@ func TestFormatNicely(tb *testing.T) {
 		}
 	}
 
+	// A2. A string value: the caret sits on the opening quote, so the highlight
+	// covers the whole token.
+	{
+		data := `{"n":"abc"}`
+		d := one(`{"properties":{"n":{"type":"integer"}}}`, data)
+
+		got := string(d.FormatNicelyContext(nil, []byte(data), 50, 50))
+		want := "{\"n\":\"abc\"}\n     ^ Wrong type\n"
+		if got != want {
+			tb.Errorf("A2: got %q, want %q", got, want)
+		}
+
+		off, end := d.valSpan()
+		if data[off] != '"' || data[end-1] != '"' {
+			tb.Errorf("A2: span %d:%d does not cover the quotes", off, end)
+		}
+	}
+
 	// B. Wide context, nothing elided.
 	{
 		data := `{"tags":[1]}`
@@ -261,21 +286,48 @@ func TestFormatNicely(tb *testing.T) {
 		}
 	}
 
+	// F. A compile finding renders against the schema text, pointing at the
+	// keyword — the same helper, the other arena.
+	{
+		src := `{"n":1,"minLength":"x"}`
+
+		var c Schema
+
+		d := AsDiag(c.Compile([]byte(src)))
+		if len(d) != 1 {
+			tb.Fatalf("F: compile %q: %+v", src, d)
+		}
+
+		got := string(d[0].FormatNicelyContext(nil, []byte(src), 50, 50))
+		want := "{\"n\":1,\"minLength\":\"x\"}\n       ^ Must be an integer\n"
+
+		if got != want {
+			tb.Errorf("F: got %q, want %q", got, want)
+		}
+
+		off, _ := d[0].opSpan()
+		if src[off] != '"' {
+			tb.Errorf("F: caret at %q, want the keyword quote", src[off])
+		}
+	}
+
 	// E. Clamping and oversized context must not panic.
 	{
-		got := string(Diag{Off: 0, End: 0, Code: TypeMismatch}.FormatNicelyContext(nil, nil, 5, 5))
+		at := func(off, end int) Node { return Node{op: Number}.withSrc(off, end) }
+
+		got := string(Diag{Code: TypeMismatch}.FormatNicelyContext(nil, nil, 5, 5))
 		if !strings.Contains(got, "^ Wrong type") {
 			tb.Errorf("E empty: %q", got)
 		}
 
-		got = string(Diag{Off: 2, End: 100, Code: TooFewItems}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
+		got = string(Diag{Val: at(2, 100), Code: TooFewItems}.FormatNicelyContext(nil, []byte(`{}`), 5, 5))
 		if !strings.Contains(got, "^ Too few items") {
 			tb.Errorf("E overrun: %q", got)
 		}
 
 		// Large before/after on a short src: caret indent stays small because start
 		// clamps to 0, so pad never approaches the 128-wide spaces constant.
-		got = string(Diag{Off: 1, End: 2, Code: TooLong}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
+		got = string(Diag{Val: at(1, 2), Code: TooLong}.FormatNicelyContext(nil, []byte(`{}`), 1000, 1000))
 		lines := strings.SplitN(got, "\n", 2)
 		if indent := strings.IndexByte(lines[1], '^'); indent != 1 {
 			tb.Errorf("E wide: caret indent %d, want 1 (stayed within 128): %q", indent, got)
@@ -291,23 +343,23 @@ func TestDiagOp(tb *testing.T) {
 		value        string
 		span         string
 	}{
-		{`{"type":["integer","null"]}`, `"x"`, TypeMismatch, Type, `["null","integer"]`, `x`},
-		{`{"minLength":3}`, `"ab"`, TooShort, MinLen, `3`, `ab`},
-		{`{"maxLength":1}`, `"ab"`, TooLong, MaxLen, `1`, `ab`},
+		{`{"type":["integer","null"]}`, `"x"`, TypeMismatch, Type, `["null","integer"]`, `"x"`},
+		{`{"minLength":3}`, `"ab"`, TooShort, MinLen, `3`, `"ab"`},
+		{`{"maxLength":1}`, `"ab"`, TooLong, MaxLen, `1`, `"ab"`},
 		{`{"minimum":3}`, `2`, BelowMinimum, Minimum, `3`, `2`},
 		{`{"enum":[1,2]}`, `3`, MustMatchEnum, Enum, `[1,2]`, `3`},
-		{`{"const":"a"}`, `"b"`, MustConst, Const, `"a"`, `b`},
-		{`{"pattern":"^a+$"}`, `"b"`, PatternMismatch, Pattern, `"^a+$"`, `b`},
-		{`{"format":"uuid"}`, `"x"`, FormatMismatch, Format, `"uuid"`, `x`},
+		{`{"const":"a"}`, `"b"`, MustConst, Const, `"a"`, `"b"`},
+		{`{"pattern":"^a+$"}`, `"b"`, PatternMismatch, Pattern, `"^a+$"`, `"b"`},
+		{`{"format":"uuid"}`, `"x"`, FormatMismatch, Format, `"uuid"`, `"x"`},
 		{`{"minItems":2}`, `[1]`, TooFewItems, MinItems, `2`, `[1]`},
 		{`{"uniqueItems":true}`, `[1,2,1]`, DuplicateItems, Unique, `true`, `1`},
 		{`{"minProperties":1}`, `{}`, TooFewProps, MinProps, `1`, `{}`},
 		{`{"not":{"type":"integer"}}`, `5`, MustNotMatch, Not, `{"type":"integer"}`, `5`},
-		{`{"anyOf":[{"type":"integer"}]}`, `"x"`, MustMatchAny, AnyOf, `[{"type":"integer"}]`, `x`},
+		{`{"anyOf":[{"type":"integer"}]}`, `"x"`, MustMatchAny, AnyOf, `[{"type":"integer"}]`, `"x"`},
 		{`{"oneOf":[{"type":"integer"},{"type":"string"}]}`, `true`, MustMatchOne, OneOf, `[{"type":"integer"},{"type":"string"}]`, `true`},
 		{`{"oneOf":[{"type":"integer"},{"type":"number"}]}`, `5`, MustMatchOnlyOne, OneOf, `[{"type":"integer"},{"type":"number"}]`, `5`},
-		{`{"properties":{"a":{}},"additionalProperties":false}`, `{"a":1,"zz":2}`, Forbidden, Additional, `false`, `zz`},
-		{`{"properties":{"a":false}}`, `{"a":1}`, Forbidden, Properties, `{"a":false}`, `a`},
+		{`{"properties":{"a":{}},"additionalProperties":false}`, `{"a":1,"zz":2}`, Forbidden, Additional, `false`, `"zz"`},
+		{`{"properties":{"a":false}}`, `{"a":1}`, Forbidden, Properties, `{"a":false}`, `"a"`},
 		{`false`, `5`, Forbidden, Fail, `false`, `5`},
 	} {
 		s := &Schema{Flags: AssertStringFormat}
@@ -335,7 +387,8 @@ func TestDiagOp(tb *testing.T) {
 			tb.Errorf("validate %s against %s: keyword value %s, want %s", tc.data, tc.schema, got, tc.value)
 		}
 
-		if got := tc.data[d[0].Off:d[0].End]; got != tc.span {
+		off, end := d[0].valSpan()
+		if got := tc.data[off:end]; got != tc.span {
 			tb.Errorf("validate %s against %s: span %q, want %q", tc.data, tc.schema, got, tc.span)
 		}
 	}
@@ -361,8 +414,8 @@ func TestDiagDetails(tb *testing.T) {
 				tb.Errorf("type: %v", got)
 			}
 		case TooShort:
-			if x.Op.Imm() != 3 {
-				tb.Errorf("minLength: %d", x.Op.Imm())
+			if x.Op.Imm() != 3 || x.Op.ImmInt() != 3 {
+				tb.Errorf("minLength: %d/%d", x.Op.Imm(), x.Op.ImmInt())
 			}
 		case PatternMismatch:
 			if got := string(r.String(x.Op)); got != "^a+$" {
@@ -402,7 +455,8 @@ func TestDiagMissingRequired(tb *testing.T) {
 			tb.Errorf("diag %d: name %q, want %q", i, got, want)
 		}
 
-		if got := string(data[d[i].Off:d[i].End]); got != string(data) {
+		off, end := d[i].valSpan()
+		if got := string(data[off:end]); got != string(data) {
 			tb.Errorf("diag %d: span %q, want the object", i, got)
 		}
 	}
@@ -419,7 +473,7 @@ func TestDiagDuplicateItems(tb *testing.T) {
 		span string
 	}{
 		{`[1,2,1]`, `1`},
-		{`["a","b","b"]`, `b`},
+		{`["a","b","b"]`, `"b"`},
 		{`[{"k":1},{"k":2},{"k":1}]`, `{"k":1}`},
 	} {
 		d, err := validate(s, []byte(tc.data))
@@ -429,8 +483,136 @@ func TestDiagDuplicateItems(tb *testing.T) {
 		}
 
 		// the second occurrence, not the array
-		if d[0].Off <= strings.Index(tc.data, tc.span) || tc.data[d[0].Off:d[0].End] != tc.span {
-			tb.Errorf("validate %s: span %d:%d %q, want the duplicate %q", tc.data, d[0].Off, d[0].End, tc.data[d[0].Off:d[0].End], tc.span)
+		off, end := d[0].valSpan()
+		if off <= strings.Index(tc.data, tc.span) || tc.data[off:end] != tc.span {
+			tb.Errorf("validate %s: span %d:%d %q, want the duplicate %q", tc.data, off, end, tc.data[off:end], tc.span)
 		}
 	}
 }
+
+// TestDiagVal reads a finding through its two nodes: Val is the offending value
+// in the data arena, Op the keyword in the schema text.
+func TestDiagVal(tb *testing.T) {
+	s, err := Compile([]byte(`{"properties":{"n":{"minLength":3}}}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	doc := []byte(`{"n":"ab"}`)
+
+	var a Applier
+
+	d, err := a.Validate(s, doc)
+	if err != nil || len(d) != 1 {
+		tb.Fatalf("diags=%v err=%v, want 1", d, err)
+	}
+
+	if d[0].Val.Op() != String {
+		tb.Errorf("Val kind: %v, want String", d[0].Val.Op())
+	}
+
+	if got := string(a.Buffer.Reader().Span(d[0].Val)); got != "ab" {
+		tb.Errorf("Val bytes: %q, want %q", got, "ab")
+	}
+
+	off, end, ok := d[0].Val.Src()
+	if !ok || string(doc[off:end]) != `"ab"` {
+		tb.Errorf("Val src: %d:%d ok=%v %q, want the token", off, end, ok, doc[off:end])
+	}
+
+	// Span is the value's place for a validation finding
+	soff, send := d[0].valSpan()
+	if soff != off || send != end {
+		tb.Errorf("Span %d:%d, want the value's %d:%d", soff, send, off, end)
+	}
+
+	// and the keyword's place for a compile finding, which has no value
+	var c Schema
+
+	cerr := c.Compile([]byte(`{"minLength":"x"}`))
+	cd := AsDiag(cerr)
+
+	if len(cd) != 1 {
+		tb.Fatalf("compile: err=%v, want one diag", cerr)
+	}
+
+	if cd[0].Val != (Node{}) {
+		tb.Errorf("compile Val: %+v, want the zero Node", cd[0].Val)
+	}
+
+	off, end = cd[0].opSpan()
+	if got := `{"minLength":"x"}`[off:end]; got != `"minLength":"x"` {
+		tb.Errorf("compile Span: %d:%d %q, want the keyword pair", off, end, got)
+	}
+
+}
+
+// TestCompileSpan locates a compile finding in the schema text: every keyword
+// reports its whole "key": value pair, at the level that failed.
+func TestCompileSpan(tb *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		span string
+	}{
+		{`{"minLength":"x"}`, `"minLength":"x"`},
+		{`{"maxLength":true}`, `"maxLength":true`},
+		{`{"minimum":"x"}`, `"minimum":"x"`},
+		{`{"uniqueItems":1}`, `"uniqueItems":1`},
+		{`{"type":"nope"}`, `"type":"nope"`},
+		{`{"pattern":"("}`, `"pattern":"("`},
+		{`{"$ref":"#/$defs/missing"}`, `"$ref":"#/$defs/missing"`},
+
+		// rejected on the value's shape, before reading it: the pair is still
+		// measured whole
+		{`{"type":123}`, `"type":123`},
+		{`{"required":"name"}`, `"required":"name"`},
+		{`{"required":[1]}`, `"required":[1]`},
+		{`{"format":123}`, `"format":123`},
+		{`{"pattern":123}`, `"pattern":123`},
+		{`{"$ref":123}`, `"$ref":123`},
+		{`{"enum":5}`, `"enum":5`},
+		{`{"properties":123}`, `"properties":123`},
+
+		// the innermost level that knows a pair wins
+		{`{"properties":{"a":{"minLength":"x"}}}`, `"minLength":"x"`},
+		{`{"$defs":{"T":{"allOf":[{"type":"nope"}]}}}`, `"type":"nope"`},
+	} {
+		var s Schema
+
+		err := s.Compile([]byte(tc.in))
+
+		d := AsDiag(err)
+		if len(d) != 1 {
+			tb.Errorf("compile %s: err=%v, want one diag", tc.in, err)
+			continue
+		}
+
+		off, end := d[0].opSpan()
+		if got := tc.in[off:end]; got != tc.span {
+			tb.Errorf("compile %s: span %d:%d %q, want %q", tc.in, off, end, got, tc.span)
+		}
+
+		if off == 0 || tc.in[off] != '"' {
+			tb.Errorf("compile %s: span %d:%d does not start at the key", tc.in, off, end)
+		}
+	}
+
+	// a schema that is not an object has no keyword to point at
+	{
+		var s Schema
+
+		d := AsDiag(s.Compile([]byte(`123`)))
+		if len(d) != 1 || d[0].Code != SchemaMustBeObject {
+			tb.Fatalf("compile 123: %+v", d)
+		}
+
+		if off, end := d[0].opSpan(); off != 0 || end != 0 {
+			tb.Errorf("compile 123: span %d:%d, want 0:0", off, end)
+		}
+	}
+}
+
+// valSpan and opSpan are the two places a finding points at: the offending value
+// in the document, and the keyword in the schema text.
+func (d Diag) valSpan() (off, end int) { off, end, _ = d.Val.Src(); return off, end }
+func (d Diag) opSpan() (off, end int)  { off, end, _ = d.Op.Src(); return off, end }

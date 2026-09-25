@@ -14,15 +14,15 @@ type (
 	// through, Value names the way in — the property name, the pattern, the
 	// branch index, the ref pointer — and Sub is the subschema reached. Doc is
 	// the document Sub lives in, which changes only at a $ref. DataKey is the
-	// data key or index the value descended by, None when the data stayed put,
+	// data key or index the value descended by, Node{} when the data stayed put,
 	// which is what tells an in-place applicator from a real step.
 	Step struct {
 		Doc   *Schema
-		Op    Opcode
-		Value Opcode
-		Sub   Opcode
+		Op    Node
+		Value Node
+		Sub   Node
 
-		DataKey Opcode
+		DataKey Node
 	}
 
 	Applier struct {
@@ -43,7 +43,7 @@ type (
 		// Depth is how far the data descended: the number of steps that moved it.
 		Depth int
 
-		dbuf [4]Diag // inline room for the first findings, filling the 768 bucket
+		dbuf [5]Diag // inline room for the first findings, filling the 1280 bucket
 
 		rewrite bool
 		save    bool // copy Steps into every Diag
@@ -54,7 +54,7 @@ type (
 	// with (normally itself, so children reach the handler too) and passes it
 	// on to Apply — pass nil to run a subtree with default behaviour only, or a
 	// different Handler to swap behaviour for that subtree.
-	Handler func(a *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error)
+	Handler func(a *Applier, s *Schema, op, val Node, h Handler) (Node, error)
 )
 
 // ErrBreak is returned by a Handler to stop the walk cleanly.
@@ -63,12 +63,12 @@ var ErrBreak = errors.New("break")
 // Validate runs s over doc, reporting what does not hold. The Applier is the
 // workspace: its Diags, Steps and Buffer are readable until the next run.
 func (a *Applier) Validate(s *Schema, doc []byte) ([]Diag, error) {
-	return a.Walk(s, None, doc, nil)
+	return a.Walk(s, Node{}, doc, nil)
 }
 
-// Walk validates doc against node op of s — None for the root, any subschema
+// Walk validates doc against node op of s — Node{} for the root, any subschema
 // for a fragment — calling h for every node it visits.
-func (a *Applier) Walk(s *Schema, op Opcode, doc []byte, h Handler) ([]Diag, error) {
+func (a *Applier) Walk(s *Schema, op Node, doc []byte, h Handler) ([]Diag, error) {
 	_, err := a.walk(s, op, doc, h, false)
 	if err != nil {
 		return nil, err
@@ -79,28 +79,28 @@ func (a *Applier) Walk(s *Schema, op Opcode, doc []byte, h Handler) ([]Diag, err
 
 // Rewrite validates doc and appends its canonical form to buf: key order, filled
 // defaults and normalized whitespace, per s.Flags.
-func (a *Applier) Rewrite(s *Schema, op Opcode, doc, buf []byte, h Handler) ([]byte, []Diag, error) {
+func (a *Applier) Rewrite(s *Schema, op Node, doc, buf []byte, h Handler) ([]byte, []Diag, error) {
 	res, err := a.walk(s, op, doc, h, true)
 	if err != nil {
 		return buf, nil, err
 	}
 
-	if res == None {
+	if res.op == None {
 		return buf, a.Diags, nil
 	}
 
 	return a.Buffer.Reader().AppendJSON(buf, res), a.Diags, nil
 }
 
-func (a *Applier) walk(s *Schema, op Opcode, doc []byte, h Handler, rewrite bool) (Opcode, error) {
+func (a *Applier) walk(s *Schema, op Node, doc []byte, h Handler, rewrite bool) (Node, error) {
 	a.reset(s, rewrite)
 
 	root, err := a.Buffer.decode(doc)
 	if err != nil {
-		return None, err
+		return Node{}, err
 	}
 
-	if op == None {
+	if op.op == None {
 		op = s.root
 	}
 
@@ -130,7 +130,7 @@ func (a *Applier) Rewriting() bool { return a.rewrite }
 // rewrite it or recurse via Apply), otherwise the default behaviour runs. h is
 // threaded through every recursion so the caller always knows which handler is
 // in effect, instead of it being implicit state.
-func (a *Applier) apply(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) apply(s *Schema, op, val Node, h Handler) (Node, error) {
 	if h == nil {
 		return a.applyStep(s, op, val, h)
 	}
@@ -141,16 +141,16 @@ func (a *Applier) apply(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
 // Apply runs the default behaviour for a node — the handler's delegate point.
 // Its recursions dispatch through h, so pass the handler along (normally the one
 // the handler was given) to keep seeing children, or nil to fall to default.
-func (a *Applier) Apply(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) Apply(s *Schema, op, val Node, h Handler) (Node, error) {
 	return a.applyStep(s, op, val, h)
 }
 
-func (a *Applier) applyStep(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) applyStep(s *Schema, op, val Node, h Handler) (Node, error) {
 	switch op.Op() {
 	case Pass:
 	case Fail:
 		// A forbidden member is reported at its key, as its keyword's finding.
-		if n := len(a.Steps); n != 0 && a.Steps[n-1].DataKey != None {
+		if n := len(a.Steps); n != 0 && a.Steps[n-1].DataKey.op != None {
 			a.Fail(Forbidden, a.Steps[n-1].Op, a.Steps[n-1].DataKey)
 		} else {
 			a.Fail(Forbidden, op, val)
@@ -283,10 +283,11 @@ func (a *Applier) applyStep(s *Schema, op, val Opcode, h Handler) (Opcode, error
 		if val.Op() == String && !s.patterns[op].Match(a.Buffer.Reader().String(val)) {
 			a.Fail(PatternMismatch, op, val)
 		}
-	case Raw, Ext, Default, Defs:
-		// Raw/Ext are kept only for round-trip (a Walk handler acts on Ext);
+	case ID, Raw, Ext, Default, Defs:
+		// ID only names the schema for $ref to find; Raw/Ext are kept only for
+		// round-trip (a Walk handler acts on Ext);
 		// Default is consumed by the enclosing Properties (insertion); Defs only
-		// holds definitions reached via $ref. None constrains a value here.
+		// holds definitions reached via $ref. Node{} constrains a value here.
 	default:
 		panic(op.Op())
 	}
@@ -294,7 +295,7 @@ func (a *Applier) applyStep(s *Schema, op, val Opcode, h Handler) (Opcode, error
 	return val, nil
 }
 
-func (a *Applier) applyChild(s *Schema, st Step, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) applyChild(s *Schema, st Step, val Node, h Handler) (Node, error) {
 	a.push(s, &st)
 	defer a.pop()
 
@@ -306,7 +307,7 @@ func (a *Applier) push(s *Schema, st *Step) {
 		st.Doc = s
 	}
 
-	if st.DataKey != None {
+	if st.DataKey.op != None {
 		a.Depth++
 	}
 
@@ -316,14 +317,14 @@ func (a *Applier) push(s *Schema, st *Step) {
 func (a *Applier) pop() {
 	last := len(a.Steps) - 1
 
-	if a.Steps[last].DataKey != None {
+	if a.Steps[last].DataKey.op != None {
 		a.Depth--
 	}
 
 	a.Steps = a.Steps[:last]
 }
 
-func (a *Applier) checkType(op, val Opcode) {
+func (a *Applier) checkType(op, val Node) {
 	mask := TypesOf(op)
 	t := dataType(val)
 
@@ -337,7 +338,7 @@ func (a *Applier) checkType(op, val Opcode) {
 	}
 }
 
-func (a *Applier) checkProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkProps(s *Schema, op, val Node, h Handler) (Node, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
@@ -349,7 +350,7 @@ func (a *Applier) checkProps(s *Schema, op, val Opcode, h Handler) (Opcode, erro
 	return a.rewriteProps(s, op, val, h)
 }
 
-func (a *Applier) validateProps(s *Schema, op, val Opcode, h Handler) error {
+func (a *Applier) validateProps(s *Schema, op, val Node, h Handler) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
@@ -369,7 +370,7 @@ func (a *Applier) validateProps(s *Schema, op, val Opcode, h Handler) error {
 	return nil
 }
 
-func (a *Applier) rewriteProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) rewriteProps(s *Schema, op, val Node, h Handler) (Node, error) {
 	mark := len(a.Buffer.tmp)
 	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
@@ -393,7 +394,7 @@ func (a *Applier) rewriteProps(s *Schema, op, val Opcode, h Handler) (Opcode, er
 	return a.Buffer.Writer().Object(a.Buffer.tmp[mark:]...), nil
 }
 
-func (a *Applier) orderedProps(s *Schema, op, val Opcode, h Handler) (bool, error) {
+func (a *Applier) orderedProps(s *Schema, op, val Node, h Handler) (bool, error) {
 	dirty := false
 
 	voff, vn := val.Off(), val.Arg()
@@ -439,7 +440,7 @@ func (a *Applier) orderedProps(s *Schema, op, val Opcode, h Handler) (bool, erro
 	return dirty, nil
 }
 
-func (a *Applier) canonProps(s *Schema, op, val Opcode, h Handler) (bool, error) {
+func (a *Applier) canonProps(s *Schema, op, val Node, h Handler) (bool, error) {
 	voff, vn := val.Off(), val.Arg()
 
 	dirty := false
@@ -497,7 +498,7 @@ func (a *Applier) canonProps(s *Schema, op, val Opcode, h Handler) (bool, error)
 	return dirty, nil
 }
 
-func (a *Applier) propSub(s *Schema, op, key Opcode) (name, sub Opcode, ok bool) {
+func (a *Applier) propSub(s *Schema, op, key Node) (name, sub Node, ok bool) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
@@ -506,12 +507,12 @@ func (a *Applier) propSub(s *Schema, op, key Opcode) (name, sub Opcode, ok bool)
 		}
 	}
 
-	return None, None, false
+	return Node{}, Node{}, false
 }
 
-func (a *Applier) defaultOf(s *Schema, sub Opcode) (Opcode, bool) {
+func (a *Applier) defaultOf(s *Schema, sub Node) (Node, bool) {
 	if sub.Op() != All {
-		return 0, false
+		return Node{}, false
 	}
 
 	for _, ch := range s.prog.Reader().Nodes(sub) {
@@ -520,21 +521,21 @@ func (a *Applier) defaultOf(s *Schema, sub Opcode) (Opcode, bool) {
 		}
 	}
 
-	return 0, false
+	return Node{}, false
 }
 
 // copyLit lifts a schema-arena literal (a property name or default value) into
 // the data arena.
-func (a *Applier) copyLit(s *Schema, op Opcode) Opcode {
+func (a *Applier) copyLit(s *Schema, op Node) Node {
 	return a.Buffer.Writer().CopyFrom(s.prog.Reader(), op)
 }
 
-func (a *Applier) checkAdditional(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkAdditional(s *Schema, op, val Node, h Handler) (Node, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
 
-	props, patterns, sub := s.additionalParts(op)
+	props, patterns, sub := s.prog.Reader().PropertiesParts(op)
 
 	if !a.rewrite {
 		return val, a.validateAdditional(s, op, props, patterns, sub, val, h)
@@ -543,7 +544,7 @@ func (a *Applier) checkAdditional(s *Schema, op, val Opcode, h Handler) (Opcode,
 	return a.rewriteAdditional(s, op, props, patterns, sub, val, h)
 }
 
-func (a *Applier) validateAdditional(s *Schema, op, props, patterns, sub, val Opcode, h Handler) error {
+func (a *Applier) validateAdditional(s *Schema, op, props, patterns, sub, val Node, h Handler) error {
 	voff, vn := val.Off(), val.Arg()
 
 	for i := range vn {
@@ -562,7 +563,7 @@ func (a *Applier) validateAdditional(s *Schema, op, props, patterns, sub, val Op
 	return nil
 }
 
-func (a *Applier) rewriteAdditional(s *Schema, op, props, patterns, sub, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) rewriteAdditional(s *Schema, op, props, patterns, sub, val Node, h Handler) (Node, error) {
 	mark := len(a.Buffer.tmp)
 	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
@@ -597,7 +598,7 @@ func (a *Applier) rewriteAdditional(s *Schema, op, props, patterns, sub, val Opc
 
 // covered reports whether key is named in the sibling properties node or matched
 // by one of the sibling patternProperties — either way it is not additional.
-func (a *Applier) covered(s *Schema, props, patterns, key Opcode) bool {
+func (a *Applier) covered(s *Schema, props, patterns, key Node) bool {
 	if props.Op() == Properties {
 		if _, _, ok := a.propSub(s, props, key); ok {
 			return true
@@ -608,7 +609,7 @@ func (a *Applier) covered(s *Schema, props, patterns, key Opcode) bool {
 }
 
 // patternHit reports whether key matches any regex in a patternProperties node.
-func (a *Applier) patternHit(s *Schema, patterns, key Opcode) bool {
+func (a *Applier) patternHit(s *Schema, patterns, key Node) bool {
 	if patterns.Op() != PatternProps {
 		return false
 	}
@@ -624,7 +625,7 @@ func (a *Applier) patternHit(s *Schema, patterns, key Opcode) bool {
 	return false
 }
 
-func (a *Applier) checkPatternProps(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkPatternProps(s *Schema, op, val Node, h Handler) (Node, error) {
 	if val.Op() != Object {
 		return val, nil
 	}
@@ -669,7 +670,7 @@ func (a *Applier) checkPatternProps(s *Schema, op, val Opcode, h Handler) (Opcod
 	return a.Buffer.Writer().Object(a.Buffer.tmp[mark:]...), nil
 }
 
-func (a *Applier) checkRequired(s *Schema, op, val Opcode) {
+func (a *Applier) checkRequired(s *Schema, op, val Node) {
 	if val.Op() != Object {
 		return
 	}
@@ -681,27 +682,27 @@ func (a *Applier) checkRequired(s *Schema, op, val Opcode) {
 	}
 }
 
-func (a *Applier) checkItems(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkItems(s *Schema, op, val Node, h Handler) (Node, error) {
 	if val.Op() != Array {
 		return val, nil
 	}
 
-	prefix, sub := s.itemsParts(op)
+	prefix, sub := s.prog.Reader().ItemsParts(op)
 
-	return a.eachItem(s, op, val, Pass, sub, prefix.ArgInt(), val.ArgInt(), h)
+	return a.eachItem(s, op, val, Node{op: Pass}, sub, prefix.ArgInt(), val.ArgInt(), h)
 }
 
-func (a *Applier) checkPrefix(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+func (a *Applier) checkPrefix(s *Schema, op, val Node, h Handler) (Node, error) {
 	if val.Op() != Array {
 		return val, nil
 	}
 
-	return a.eachItem(s, op, val, op, Pass, 0, op.ArgInt(), h)
+	return a.eachItem(s, op, val, op, Node{op: Pass}, 0, op.ArgInt(), h)
 }
 
 // eachItem applies prefix[i] to item i while i < len(prefix), sub to the rest,
 // over the index range [first, last).
-func (a *Applier) eachItem(s *Schema, op, val, prefix, sub Opcode, first, last int, h Handler) (Opcode, error) {
+func (a *Applier) eachItem(s *Schema, op, val, prefix, sub Node, first, last int, h Handler) (Node, error) {
 	mark := len(a.Buffer.tmp)
 	defer func() { a.Buffer.tmp = a.Buffer.tmp[:mark] }()
 
@@ -722,7 +723,7 @@ func (a *Applier) eachItem(s *Schema, op, val, prefix, sub Opcode, first, last i
 			continue
 		}
 
-		kw, idx := op, None
+		kw, idx := op, Node{}
 		if i < pn {
 			kw, idx = prefix, MakeInt(int64(i))
 		}
@@ -746,7 +747,7 @@ func (a *Applier) eachItem(s *Schema, op, val, prefix, sub Opcode, first, last i
 	return a.Buffer.Writer().Array(a.Buffer.tmp[mark:]...), nil
 }
 
-func (a *Applier) checkUnique(op, val Opcode) {
+func (a *Applier) checkUnique(op, val Node) {
 	if val.Op() != Array {
 		return
 	}
@@ -763,7 +764,7 @@ func (a *Applier) checkUnique(op, val Opcode) {
 	}
 }
 
-func (a *Applier) checkEnum(s *Schema, op, val Opcode) {
+func (a *Applier) checkEnum(s *Schema, op, val Node) {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
@@ -775,7 +776,7 @@ func (a *Applier) checkEnum(s *Schema, op, val Opcode) {
 	a.Fail(MustMatchEnum, op, val)
 }
 
-func (a *Applier) checkAnyOf(s *Schema, op, val Opcode, h Handler) error {
+func (a *Applier) checkAnyOf(s *Schema, op, val Node, h Handler) error {
 	off, n := op.Off(), op.Arg()
 
 	for i := range n {
@@ -794,7 +795,7 @@ func (a *Applier) checkAnyOf(s *Schema, op, val Opcode, h Handler) error {
 	return nil
 }
 
-func (a *Applier) checkOneOf(s *Schema, op, val Opcode, h Handler) error {
+func (a *Applier) checkOneOf(s *Schema, op, val Node, h Handler) error {
 	off, n := op.Off(), op.Arg()
 	cnt := 0
 
@@ -818,19 +819,19 @@ func (a *Applier) checkOneOf(s *Schema, op, val Opcode, h Handler) error {
 	return nil
 }
 
-func (a *Applier) checkCond(s *Schema, op, val Opcode, h Handler) (Opcode, error) {
-	cond, then, els := s.condParts(op)
+func (a *Applier) checkCond(s *Schema, op, val Node, h Handler) (Node, error) {
+	cond, then, els := s.prog.Reader().CondParts(op)
 
-	ok, err := a.matches(s, Step{Op: op, Value: If, Sub: cond}, val, h)
+	ok, err := a.matches(s, Step{Op: op, Value: Node{op: If}, Sub: cond}, val, h)
 	if err != nil {
 		return val, err
 	}
 
 	if ok {
-		return a.applyChild(s, Step{Op: op, Value: Then, Sub: then}, val, h)
+		return a.applyChild(s, Step{Op: op, Value: Node{op: Then}, Sub: then}, val, h)
 	}
 
-	return a.applyChild(s, Step{Op: op, Value: Else, Sub: els}, val, h)
+	return a.applyChild(s, Step{Op: op, Value: Node{op: Else}, Sub: els}, val, h)
 }
 
 // matches calls apply, but drops diag messages.
@@ -838,7 +839,7 @@ func (a *Applier) checkCond(s *Schema, op, val Opcode, h Handler) (Opcode, error
 // whatever it had to say either way. A caller that wants those diagnostics reads
 // them as they appear — through a handler — because by the time this returns they
 // are gone.
-func (a *Applier) matches(s *Schema, st Step, val Opcode, h Handler) (bool, error) {
+func (a *Applier) matches(s *Schema, st Step, val Node, h Handler) (bool, error) {
 	n := len(a.Diags)
 	defer func() { a.Diags = a.Diags[:n] }()
 
@@ -849,7 +850,7 @@ func (a *Applier) matches(s *Schema, st Step, val Opcode, h Handler) (bool, erro
 	return len(a.Diags) == n, nil
 }
 
-func (a *Applier) member(s *Schema, obj, key Opcode) (k, v Opcode, ok bool) {
+func (a *Applier) member(s *Schema, obj, key Node) (k, v Node, ok bool) {
 	voff, vn := obj.Off(), obj.Arg()
 
 	for i := range vn {
@@ -858,29 +859,29 @@ func (a *Applier) member(s *Schema, obj, key Opcode) (k, v Opcode, ok bool) {
 		}
 	}
 
-	return 0, 0, false
+	return Node{}, Node{}, false
 }
 
-func (a *Applier) keyEq(s *Schema, data, schema Opcode) bool {
+func (a *Applier) keyEq(s *Schema, data, schema Node) bool {
 	return bytes.Equal(a.Buffer.Reader().Span(data), s.prog.Reader().Span(schema))
 }
 
-func (a *Applier) equalLit(s *Schema, val, lit Opcode) bool {
+func (a *Applier) equalLit(s *Schema, val, lit Node) bool {
 	return equalBuf(a.Buffer.Reader(), val, s.prog.Reader(), lit)
 }
 
-func (a *Applier) number(val Opcode) float64 {
+func (a *Applier) number(val Node) float64 {
 	v, _ := a.Buffer.Reader().Float(val)
 	return v
 }
 
-func (a *Applier) schemaNum(s *Schema, op Opcode) float64 {
+func (a *Applier) schemaNum(s *Schema, op Node) float64 {
 	lit := s.prog.code[op.Off()]
 	v, _ := json2.Value(s.prog.Reader().Span(lit)).Float64()
 	return v
 }
 
-func (a *Applier) multipleOf(s *Schema, op, val Opcode) bool {
+func (a *Applier) multipleOf(s *Schema, op, val Node) bool {
 	lit := s.prog.code[op.Off()]
 	div := s.prog.Reader().Span(lit)
 
@@ -891,12 +892,8 @@ func (a *Applier) multipleOf(s *Schema, op, val Opcode) bool {
 		ok, exact = isMultiple(a.Buffer.Reader().Span(val), div)
 	case IntLit:
 		if md, sd, good := parseDecimal(div); good {
-			ok, exact = isMultipleDec(magnitude(val.Imm()), 0, md, sd)
+			ok, exact = isMultipleDec(magnitude(val.Int()), 0, md, sd)
 		}
-
-		// FltLit spends its low mantissa bits on the opcode, so it is not the number
-		// the caller wrote and has no exact decimal to test — leave it to the float
-		// fallback. Synthesize a Number span instead when exactness matters.
 	}
 
 	if exact {
@@ -907,18 +904,17 @@ func (a *Applier) multipleOf(s *Schema, op, val Opcode) bool {
 	return m == 0 || math.Mod(a.number(val), m) == 0
 }
 
-func (a *Applier) integral(val Opcode) bool {
+func (a *Applier) integral(val Node) bool {
 	v := a.number(val)
 	return v == math.Trunc(v)
 }
 
-func (a *Applier) strlen(val Opcode) int64 {
+func (a *Applier) strlen(val Node) int64 {
 	return int64(utf8.RuneCount(a.Buffer.Reader().Span(val)))
 }
 
-func (a *Applier) Fail(code DiagCode, op, val Opcode) {
-	off, end, _ := a.Buffer.Reader().Source(val)
-	d := Diag{Code: code, Op: op, Off: off, End: end}
+func (a *Applier) Fail(code DiagCode, op, val Node) {
+	d := Diag{Code: code, Op: op, Val: val}
 
 	if a.save {
 		d.Steps = append([]Step(nil), a.Steps...)
@@ -951,7 +947,7 @@ func magnitude(v int64) uint64 {
 	return u
 }
 
-func isNumber(op Opcode) bool {
+func isNumber(op Node) bool {
 	switch op.Op() {
 	case Number, IntLit, FltLit:
 		return true
@@ -960,7 +956,7 @@ func isNumber(op Opcode) bool {
 	}
 }
 
-func dataType(val Opcode) Types {
+func dataType(val Node) Types {
 	switch val.Op() {
 	case Null:
 		return TypeNull
@@ -979,7 +975,7 @@ func dataType(val Opcode) Types {
 	}
 }
 
-func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
+func equalBuf(lb BufferReader, l Node, rb BufferReader, r Node) bool {
 	// Numbers compare by value across shapes: the same number reaches here as a
 	// Number span from the input or as an IntLit/FltLit word from a handler.
 	if isNumber(l) && isNumber(r) {
@@ -1036,7 +1032,7 @@ func equalBuf(lb BufferReader, l Opcode, rb BufferReader, r Opcode) bool {
 	}
 }
 
-func objCount(hb BufferReader, off, n int64, kb BufferReader, key, val Opcode) (c int64) {
+func objCount(hb BufferReader, off, n int64, kb BufferReader, key, val Node) (c int64) {
 	for j := range n {
 		if equalBuf(hb, hb.code[off+2*j], kb, key) && equalBuf(hb, hb.code[off+2*j+1], kb, val) {
 			c++

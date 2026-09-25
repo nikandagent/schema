@@ -15,14 +15,14 @@ type (
 	// write through Writer — the two thin wrappers split the value API so a
 	// signature says which half it needs.
 	Buffer struct {
-		code []Opcode // value node arena
-		src  []byte   // input bytes, spans point here
-		text []byte   // produced scalars
+		code []Node // value node arena
+		src  []byte // input bytes, read-only, spans point here
+		text []byte // produced scalars, reused private buffer
 
-		tmp []Opcode // decode scratch
+		tmp []Node // decode scratch
 
 		textbuf [16]byte
-		opbuf   [46]Opcode // size is tuned for allocation span buckets
+		opbuf   [49]Node // sized to fill the 896 bucket: tmp opbuf[:10], code the rest
 	}
 
 	// BufferReader is the read-only face of a Buffer.
@@ -51,34 +51,34 @@ func (b *Buffer) Reset() {
 	b.tmp = b.tmp[:0]
 }
 
-func (b *Buffer) decode(r []byte) (Opcode, error) {
+func (b *Buffer) decode(r []byte) (Node, error) {
 	b.src = r
 
 	return b.valueFull(r, false)
 }
 
-func (b *Buffer) valueFull(r []byte, intern bool) (Opcode, error) {
+func (b *Buffer) valueFull(r []byte, intern bool) (Node, error) {
 	var d json2.Iterator
 
 	val, i, err := b.value(r, 0, intern)
 	if err != nil {
-		return 0, normSyntax(err)
+		return Node{}, normSyntax(err)
 	}
 
 	i = d.SkipSpaces(r, i)
 	if i != len(r) {
-		return 0, ErrTrailingData
+		return Node{}, ErrTrailingData
 	}
 
 	return val, nil
 }
 
-func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err error) {
+func (b *Buffer) value(r []byte, st int, intern bool) (val Node, i int, err error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(r, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	switch tp {
@@ -89,15 +89,15 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 	case json2.String, json2.Number:
 		j, err := d.Skip(r, i)
 		if err != nil {
-			return 0, j, err
+			return Node{}, j, err
 		}
 
 		if tp == json2.Number {
 			if intern {
-				return b.Writer().Span(Number, r[i:j]), j, nil
+				return b.Writer().Span(Number, r[i:j]).withSrc(i, j), j, nil
 			}
 
-			return makeNode(Number, i, j-i), j, nil
+			return makeNode(Number, i, j-i).withSrc(i, j), j, nil
 		}
 
 		val, err := b.str(r, i, j, String, intern)
@@ -106,10 +106,10 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 	case json2.Null:
 		j, err := d.Skip(r, i)
 		if err != nil {
-			return 0, j, err
+			return Node{}, j, err
 		}
 
-		return makeNode(Null, i, j-i), j, nil
+		return makeNode(Null, i, j-i).withSrc(i, j), j, nil
 	case json2.Bool:
 		op := False
 		if r[i] == 't' {
@@ -118,12 +118,12 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 
 		j, err := d.Skip(r, i)
 		if err != nil {
-			return 0, j, err
+			return Node{}, j, err
 		}
 
-		return makeNode(op, i, j-i), j, nil
+		return makeNode(op, i, j-i).withSrc(i, j), j, nil
 	default:
-		return 0, i, json2.ErrSyntax
+		return Node{}, i, json2.ErrSyntax
 	}
 }
 
@@ -131,30 +131,30 @@ func (b *Buffer) value(r []byte, st int, intern bool) (val Opcode, i int, err er
 // string itself, never its spelling, so an unescaped token is the source body
 // as it stands and costs no copy; only an escaped one is decoded into the text
 // tail, and gives up its source position by moving there.
-func (b *Buffer) str(r []byte, i, j int, op Opcode, intern bool) (Opcode, error) {
+func (b *Buffer) str(r []byte, i, j int, op Opcode, intern bool) (Node, error) {
 	tok := r[i:j]
 
 	if bytes.IndexByte(tok, '\\') < 0 {
 		if intern {
-			return b.Writer().Span(op, tok[1:len(tok)-1]), nil
+			return b.Writer().Span(op, tok[1:len(tok)-1]).withSrc(i, j), nil
 		}
 
-		return makeNode(op, i+1, j-i-2), nil
+		return makeNode(op, i+1, j-i-2).withSrc(i, j), nil
 	}
 
 	off := len(b.src) + len(b.text)
 
 	s, text, _, _ := skip.DecodeString(tok, 0, skip.Dqt|skip.StrEscapes, b.text)
 	if s.Err() {
-		return 0, json2.ErrSyntax
+		return Node{}, json2.ErrSyntax
 	}
 
 	b.text = text
 
-	return makeNode(op, off, len(b.src)+len(b.text)-off), nil
+	return makeNode(op, off, len(b.src)+len(b.text)-off).withSrc(i, j), nil
 }
 
-func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
+func (b *Buffer) array(r []byte, st int, intern bool) (Node, int, error) {
 	mark := len(b.tmp)
 	defer func() { b.tmp = b.tmp[:mark] }()
 
@@ -162,27 +162,27 @@ func (b *Buffer) array(r []byte, st int, intern bool) (Opcode, int, error) {
 
 	i, err := d.Enter(r, st, json2.Array)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var val Opcode
+	var val Node
 
 	for d.ForMore(r, &i, json2.Array, &err) {
 		val, i, err = b.value(r, i, intern)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		b.tmp = append(b.tmp, val)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	return b.Writer().Nodes(Array, b.tmp[mark:], st, i), i, nil
+	return b.Writer().Nodes(Array, b.tmp[mark:]).withSrc(st, i), i, nil
 }
 
-func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
+func (b *Buffer) object(r []byte, st int, intern bool) (Node, int, error) {
 	mark := len(b.tmp)
 	defer func() { b.tmp = b.tmp[:mark] }()
 
@@ -190,92 +190,82 @@ func (b *Buffer) object(r []byte, st int, intern bool) (Opcode, int, error) {
 
 	i, err := d.Enter(r, st, json2.Object)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var key, val Opcode
+	var key, val Node
 
 	for d.ForMore(r, &i, json2.Object, &err) {
 		key, i, err = b.value(r, i, intern)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		val, i, err = b.value(r, i, intern)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		b.tmp = append(b.tmp, key, val)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	return b.Writer().Nodes(Object, b.tmp[mark:], st, i), i, nil
+	return b.Writer().Nodes(Object, b.tmp[mark:]).withSrc(st, i), i, nil
 }
 
-func (b BufferWriter) FromJSON(r []byte) (Opcode, error) {
+func (b BufferWriter) FromJSON(r []byte) (Node, error) {
 	return b.Buffer.valueFull(r, true)
 }
 
-func (b BufferWriter) DecodeJSON(r []byte, st int) (Opcode, int, error) {
+func (b BufferWriter) DecodeJSON(r []byte, st int) (Node, int, error) {
 	return b.value(r, st, true)
 }
 
-func (b BufferWriter) Span(op Opcode, s []byte) Opcode {
+func (b BufferWriter) Span(op Opcode, s []byte) Node {
 	off := len(b.src) + len(b.text)
 	b.text = append(b.text, s...)
 
 	return makeNode(op.Op(), off, len(s))
 }
 
-func (b BufferWriter) Bytes(s []byte) Opcode {
+func (b BufferWriter) Bytes(s []byte) Node {
 	return b.Span(String, s)
 }
 
-func (b BufferWriter) String(s string) Opcode {
+func (b BufferWriter) String(s string) Node {
 	return b.Bytes([]byte(s))
 }
 
-func (b BufferWriter) Int(x int) Opcode {
+func (b BufferWriter) Int(x int) Node {
 	return MakeInt(int64(x))
 }
 
-func (b BufferWriter) Int64(x int64) Opcode {
+func (b BufferWriter) Int64(x int64) Node {
 	return MakeInt(x)
 }
 
-func (b BufferWriter) Float(x float64) Opcode {
+func (b BufferWriter) Float(x float64) Node {
 	return MakeFlt(x)
 }
 
-func (b BufferWriter) Bool(x bool) Opcode {
+func (b BufferWriter) Bool(x bool) Node {
 	if x {
-		return True
+		return Node{op: True}
 	}
 
-	return False
+	return Node{op: False}
 }
 
-func (b BufferWriter) Null() Opcode {
-	return Null
+func (b BufferWriter) Null() Node {
+	return Node{op: Null}
 }
 
-// Nodes assembles nodes into a fresh container of kind cont (Array or Object) in
-// b. When st >= 0 it parks the source span [st,end) just before the nodes,
-// readable via span; pass st < 0 for a synthesized value with no source. The
-// span rides one SrcSpan word, or two SrcOff words (start, end) when it is too
-// wide for the len field.
-func (b BufferWriter) Nodes(cont Opcode, nodes []Opcode, st, end int) Opcode {
-	if st >= 0 {
-		if n := end - st; n >= 0 && n <= maxArg {
-			b.code = append(b.code, makeNode(SrcSpan, st, n))
-		} else {
-			b.code = append(b.code, makeImm(SrcOff, st), makeImm(SrcOff, end))
-		}
-	}
-
+// Nodes assembles nodes into a fresh container of kind cont (Array or Object)
+// in b. The container's own source span, if it has one, is set with withSrc by
+// the caller that read it.
+func (b BufferWriter) Nodes(cont Opcode, nodes []Node) Node {
 	off := len(b.code)
 	b.code = append(b.code, nodes...)
 
@@ -288,17 +278,17 @@ func (b BufferWriter) Nodes(cont Opcode, nodes []Opcode, st, end int) Opcode {
 }
 
 // Array assembles elems into a fresh array value in b.
-func (b BufferWriter) Array(elems ...Opcode) Opcode { return b.Nodes(Array, elems, -1, -1) }
+func (b BufferWriter) Array(elems ...Node) Node { return b.Nodes(Array, elems) }
 
 // Object assembles alternating key/value words into a fresh object value in b.
-func (b BufferWriter) Object(kv ...Opcode) Opcode { return b.Nodes(Object, kv, -1, -1) }
+func (b BufferWriter) Object(kv ...Node) Node { return b.Nodes(Object, kv) }
 
-func (b BufferWriter) CopyFrom(src BufferReader, op Opcode) Opcode {
+func (b BufferWriter) CopyFrom(src BufferReader, op Node) Node {
 	switch op.Op() {
 	case Null, True, False, IntLit, FltLit:
 		return op // self-contained words: the value rides the opcode, no bytes to copy
 	case Number, String:
-		return b.Span(op, src.Span(op))
+		return b.Span(op.Op(), src.Span(op))
 	case Array, Object:
 		mark := len(b.tmp)
 		defer func() { b.tmp = b.tmp[:mark] }()
@@ -337,7 +327,7 @@ func (b BufferReader) AppendPointer(w []byte, steps []Step) []byte {
 
 			w = e.AppendString(append(w, '.'), key)
 		case IntLit:
-			w = append(strconv.AppendInt(append(w, '['), st.DataKey.Imm(), 10), ']')
+			w = append(strconv.AppendInt(append(w, '['), st.DataKey.Int(), 10), ']')
 		}
 	}
 
@@ -362,7 +352,7 @@ func identKey(s []byte) bool {
 	return len(s) != 0
 }
 
-func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
+func (b BufferReader) AppendJSON(w []byte, val Node) []byte {
 	switch val.Op() {
 	case Null:
 		return append(w, "null"...)
@@ -377,7 +367,7 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 
 		return e.AppendString(w, b.Span(val))
 	case IntLit:
-		return strconv.AppendInt(w, val.Imm(), 10)
+		return strconv.AppendInt(w, val.Int(), 10)
 	case FltLit:
 		return strconv.AppendFloat(w, val.Flt(), 'f', -1, 64)
 	case Array:
@@ -420,10 +410,10 @@ func (b BufferReader) AppendJSON(w []byte, val Opcode) []byte {
 // string kind holds the string itself, decoded; a Number holds its lexeme. The
 // result is empty for a node whose kind carries bytes but this one has none: a
 // synthesized container, or a bare null/true/false word. It panics on a kind
-// that never carries any (IntLit, FltLit, None) — that is a property of the
+// that never carries any (IntLit, FltLit, Node{}) — that is a property of the
 // opcode, not of the value, so it cannot depend on where the node came from.
 // Ask Source when the origin is what you need.
-func (b BufferReader) Span(op Opcode) []byte {
+func (b BufferReader) Span(op Node) []byte {
 	off, end := b.span(op)
 
 	// Spans resolve a virtual src++text concat: bytes below len(src) live in the
@@ -435,70 +425,24 @@ func (b BufferReader) Span(op Opcode) []byte {
 	return b.text[off-len(b.src) : end-len(b.src)]
 }
 
-func (b BufferReader) span(op Opcode) (off, end int) {
+func (b BufferReader) span(op Node) (off, end int) {
 	switch op.Op() {
-	case Number, String, Null, False, True, Pattern, Ref, Key:
+	case Number, String, Pattern, ID, Ref, Null, False, True:
 		return op.SpanInt()
 	case None:
 		return 0, 0
 	case Object, Array:
+		off, end, _ = op.Src()
+		return off, end
 	default:
 		panic(op.Op())
 	}
-
-	off, end, _ = b.contSpan(op)
-	return off, end
-}
-
-// Source locates op in the input bytes. Values decoded from src carry their
-// source span; values synthesized through BufferWriter do not — ok is false and
-// off/end are zero, which is the normal case for a node a Walk handler produced.
-// A string that had escapes reads the same way: decoding moved it to the text
-// tail, so it keeps its value but loses its place in the input.
-// Use it for diagnostics; Span reads the bytes and has no answer for a node that
-// never was text. Panics on a word that is not a value node.
-//
-// A zero-width span is a position, not an absence — it names the place where
-// something should have been. So a bare Null/True/False word, which carries no
-// span, reads as position 0 in src and cannot be told apart from a decoded one.
-func (b BufferReader) Source(op Opcode) (off, end int, ok bool) {
-	switch op.Op() {
-	case Number, String, Null, False, True, Pattern, Ref, Key:
-		off, end = op.SpanInt()
-
-		// Synthesized scalars live in the text tail, past the input.
-		if end <= len(b.src) {
-			return off, end, true
-		}
-
-		return 0, 0, false
-	case IntLit, FltLit, None:
-		return 0, 0, false
-	case Object, Array:
-		return b.contSpan(op)
-	default:
-		panic(op.Op())
-	}
-}
-
-// contSpan reads the source span parked just before a container's children.
-func (b BufferReader) contSpan(op Opcode) (off, end int, ok bool) {
-	idx := op.OffInt()
-	if idx-1 >= 0 && b.code[idx-1].Op() == SrcSpan {
-		off, end = b.code[idx-1].SpanInt()
-		return off, end, true
-	}
-	if idx-2 >= 0 && b.code[idx-2].Op() == SrcOff && b.code[idx-1].Op() == SrcOff {
-		return b.code[idx-2].ImmInt(), b.code[idx-1].ImmInt(), true
-	}
-
-	return 0, 0, false
 }
 
 // Nodes unwraps a container node into its child words. Result slice is owned by
 // Buffer. Panics on a node that is not a container (single-child pointers like
 // Not/Items/Const are references, not containers).
-func (b BufferReader) Nodes(op Opcode) []Opcode {
+func (b BufferReader) Nodes(op Node) []Node {
 	off, n := op.OffInt(), op.ArgInt()
 
 	switch op.Op() {
@@ -513,17 +457,17 @@ func (b BufferReader) Nodes(op Opcode) []Opcode {
 	return b.code[off : off+n]
 }
 
-func (b BufferReader) NodesLen(op Opcode) int {
+func (b BufferReader) NodesLen(op Node) int {
 	return op.ArgInt()
 }
 
-func (b BufferReader) NodesAt(op Opcode, i int) (k, v Opcode) {
+func (b BufferReader) NodesAt(op Node, i int) (k, v Node) {
 	off, n := op.OffInt(), op.ArgInt()
 	if i < 0 {
 		i = n + i
 	}
 	if i >= n || i < 0 {
-		return None, None
+		return Node{}, Node{}
 	}
 
 	switch op.Op() {
@@ -539,24 +483,24 @@ func (b BufferReader) NodesAt(op Opcode, i int) (k, v Opcode) {
 }
 
 // Ext returns the value node of the extension keyword named key (e.g. "x-type")
-// among the keywords of schema node op (an All), or None if absent. The key is
+// among the keywords of schema node op (an All), or Node{} if absent. The key is
 // matched whole, so any extension prefix falls into the same path. The value is
-// left to the caller to interpret; None is never a valid value.
-func (b BufferReader) Ext(op Opcode, key string) Opcode {
+// left to the caller to interpret; Node{} is never a valid value.
+func (b BufferReader) Ext(op Node, key string) Node {
 	return b.named(op, Ext, key)
 }
 
 // Raw returns the value node of the keyword named key kept verbatim among the
-// keywords of schema node op (an All), or None if absent — an annotation the
+// keywords of schema node op (an All), or Node{} if absent — an annotation the
 // vocabulary carries but never applies ("title", "format", "$comment"), or a
 // keyword outside it. An extension keyword is an Ext, not a Raw.
-func (b BufferReader) Raw(op Opcode, key string) Opcode {
+func (b BufferReader) Raw(op Node, key string) Node {
 	return b.named(op, Raw, key)
 }
 
 // named finds the pair keyword of kind kind spelled key. Ext and Raw repeat
 // within an All, so unlike every other keyword they are reached by name.
-func (b BufferReader) named(op, kind Opcode, key string) Opcode {
+func (b BufferReader) named(op Node, kind Opcode, key string) Node {
 	if op.Op() != All {
 		panic(op.Op())
 	}
@@ -572,14 +516,14 @@ func (b BufferReader) named(op, kind Opcode, key string) Opcode {
 		}
 	}
 
-	return None
+	return Node{}
 }
 
 // Find is the value under key in a pair-block: a data Object, or a schema
-// Properties, PatternProps or Defs. None when the key is not there — a value
-// node is never None, so the answer is unambiguous. Keys compare as bytes
+// Properties, PatternProps or Defs. Node{} when the key is not there — a value
+// node is never Node{}, so the answer is unambiguous. Keys compare as bytes
 // because a string node holds the string, not its spelling.
-func (b BufferReader) Find(op Opcode, key string) Opcode {
+func (b BufferReader) Find(op Node, key string) Node {
 	switch op.Op() {
 	case Object, Properties, PatternProps, Defs:
 	default:
@@ -594,18 +538,18 @@ func (b BufferReader) Find(op Opcode, key string) Opcode {
 		}
 	}
 
-	return None
+	return Node{}
 }
 
 // Iter ranges over the children of any node, pairing key with value — the
 // generalization of Nodes/NodesAt (pair- and list-blocks), Deref (single-child
 // pointers), and the variadic Additional. Pair-blocks yield (key, sub);
-// list-blocks yield (IntLit index, elem); single-child nodes yield (None, sub). A
+// list-blocks yield (IntLit index, elem); single-child nodes yield (Node{}, sub). A
 // scalar or in-opcode keyword (Type, MinLen, Pattern, …) has no children.
-func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
+func (b BufferReader) Iter(op Node) iter.Seq2[Node, Node] {
 	off := op.OffInt()
 
-	return func(yield func(k, v Opcode) bool) {
+	return func(yield func(k, v Node) bool) {
 		switch op.Op() {
 		case Object, Properties, PatternProps, Defs, Raw, Ext:
 			for i := range op.ArgInt() {
@@ -621,23 +565,23 @@ func (b BufferReader) Iter(op Opcode) iter.Seq2[Opcode, Opcode] {
 			}
 		case Additional:
 			if op.ArgInt() == 3 {
-				yield(None, b.code[off+2]) // props, patterns, sub — sub only
+				yield(Node{}, b.code[off+2]) // props, patterns, sub — sub only
 				return
 			}
 
-			yield(None, b.code[off])
+			yield(Node{}, b.code[off])
 		case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
-			yield(None, b.code[off])
+			yield(Node{}, b.code[off])
 		}
 	}
 }
 
 // Keyword returns the keyword node of kind want among the keywords of schema
-// node op (an All), or None if absent. Every keyword is unique per schema, so the
+// node op (an All), or Node{} if absent. Every keyword is unique per schema, so the
 // match is unambiguous — except Ext and Raw, which repeat and are keyed by name;
 // look those up with Ext or Raw. Read the returned node with Deref, Nodes, or
 // its Imm, per the keyword.
-func (b BufferReader) Keyword(op, want Opcode) Opcode {
+func (b BufferReader) Keyword(op Node, want Opcode) Node {
 	if op.Op() != All {
 		panic(op.Op())
 	}
@@ -648,14 +592,14 @@ func (b BufferReader) Keyword(op, want Opcode) Opcode {
 		}
 	}
 
-	return None
+	return Node{}
 }
 
 // Deref returns the single child of a pointer node — the subschema or operand it
 // points at (Not/Items/Const/Default/Minimum/…). These hold one reference, not a
 // list, so it panics on any other op. Additional is variadic — split it with
-// additionalParts instead.
-func (b BufferReader) Deref(op Opcode) Opcode {
+// PropertiesParts instead.
+func (b BufferReader) Deref(op Node) Node {
 	switch op.Op() {
 	case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 		return b.code[op.OffInt()]
@@ -664,12 +608,12 @@ func (b BufferReader) Deref(op Opcode) Opcode {
 	}
 }
 
-// String is the string a String, Pattern, Ref or Key node holds. Strings are
+// String is the string a String, Pattern, ID or Ref node holds. Strings are
 // stored decoded, so this is the node's own bytes: no copy, no scratch, valid
 // for as long as the buffer is not rewritten.
-func (b BufferReader) String(op Opcode) []byte {
+func (b BufferReader) String(op Node) []byte {
 	switch op.Op() {
-	case String, Pattern, Ref, Key:
+	case String, Pattern, ID, Ref:
 		return b.Span(op)
 	default:
 		panic(op.Op())
@@ -680,15 +624,15 @@ func (b BufferReader) String(op Opcode) []byte {
 // JSON text (a Num span) or synthesized in-opcode (an IntLit or FltLit). A
 // non-numeric node yields ErrNotNumber; a malformed Num span yields the decoder's
 // parse error.
-func (b BufferReader) Int(op Opcode) (int, error) {
+func (b BufferReader) Int(op Node) (int, error) {
 	v, err := b.Int64(op)
 	return int(v), err
 }
 
-func (b BufferReader) Int64(op Opcode) (int64, error) {
+func (b BufferReader) Int64(op Node) (int64, error) {
 	switch op.Op() {
 	case IntLit:
-		return op.Imm(), nil
+		return op.Int(), nil
 	case FltLit:
 		v := op.Flt()
 		if v != math.Trunc(v) {
@@ -720,12 +664,12 @@ func (b BufferReader) Int64(op Opcode) (int64, error) {
 	}
 }
 
-func (b BufferReader) Float(op Opcode) (float64, error) {
+func (b BufferReader) Float(op Node) (float64, error) {
 	switch op.Op() {
 	case FltLit:
 		return op.Flt(), nil
 	case IntLit:
-		return float64(op.Imm()), nil
+		return float64(op.Int()), nil
 	case Number:
 		return json2.Value(b.Span(op)).Float64()
 	default:

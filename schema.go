@@ -9,7 +9,7 @@ type (
 	Schema struct {
 		Flags Flags // canonicalization switches; the zero value is the canonical default
 
-		root Opcode
+		root Node
 		prog Buffer // compiled program: code nodes + schema bytes (src) + compile scratch (tmp)
 
 		defs []def
@@ -26,13 +26,29 @@ type (
 		// caller owns all path/version/transport logic.
 		Resolve func(base, ref string) ([]byte, error)
 
-		patterns map[Opcode]*regexp.Regexp // pattern node -> compiled regex, filled at compile
+		patterns map[Node]*regexp.Regexp // pattern node -> compiled regex, filled at compile
 
-		defsbuf [8]def // inline room for a small $defs table, filling the 768 bucket
+		defsbuf [9]def // inline room for a small $defs table, filling the 1280 bucket
 	}
 
-	// Opcode is a schema instruction.
+	// Opcode is a schema instruction: the kind, plus the payload packed into
+	// the same word.
 	Opcode uint64
+
+	// Node is one instruction as it is stored: the opcode and a meta word.
+	// meta mirrors the opcode layout, so its off and len fields read with the
+	// same accessors; what it holds is fixed by the opcode:
+	//
+	//	IntLit         the int64 value, exact
+	//	FltLit         the float64 bits, exact
+	//	anything else  the node's span in the source text, zero when it has none
+	//
+	// The low 8 bits of meta — the opcode's own code and shape slot — are free
+	// for flags.
+	Node struct {
+		op   Opcode
+		meta Opcode
+	}
 
 	// Flags select deviations from the canonical default. The zero value
 	// canonicalizes both schema and data and fills defaults; the Keep* bits opt
@@ -65,7 +81,7 @@ func (f *Flags) Set(g Flags)    { *f |= g }
 func (f *Flags) Unset(g Flags)  { *f &^= g }
 
 // Root is the compiled program's root node; walk it with SchemaBuf.
-func (s *Schema) Root() Opcode { return s.root }
+func (s *Schema) Root() Node { return s.root }
 
 // Reader is the program arena (read-only): the nodes and bytes the schema
 // keywords point into. Pair with Root to traverse the program.
@@ -123,7 +139,8 @@ const (
 	String
 	Pattern
 
-	Key
+	ID
+
 	Ref
 )
 
@@ -137,12 +154,9 @@ const (
 	MinProps
 	MaxProps
 	Format
-	Canon
 
 	IntLit
 	FltLit
-	SrcOff
-	SrcSpan
 )
 
 const (
@@ -208,7 +222,7 @@ var typeNames = []struct {
 
 // TypesOf is the set a Type keyword admits, or the empty set for None — so the
 // absent keyword Keyword returns needs no check. Any other node panics.
-func TypesOf(op Opcode) Types {
+func TypesOf(op Node) Types {
 	switch op.Op() {
 	case Type:
 		return Types(op.Imm())
@@ -244,7 +258,7 @@ func (t Types) String() string {
 	return string(b)
 }
 
-func makeNode(op Opcode, off, n int) Opcode {
+func pack(op Opcode, off, n int) Opcode {
 	if off < 0 || int64(off) > maxOff {
 		panic(off)
 	}
@@ -255,35 +269,32 @@ func makeNode(op Opcode, off, n int) Opcode {
 	return op | Opcode(n)<<argShift | Opcode(off)<<offShift
 }
 
-func MakeInt(v int64) Opcode {
-	if v < minImm || v > maxImm {
-		panic(v)
-	}
-
-	return IntLit | Opcode(v)<<argShift
+func makeNode(op Opcode, off, n int) Node {
+	return Node{op: pack(op, off, n)}
 }
 
-func makeImm(op Opcode, v int) Opcode {
+func makeImm(op Opcode, v int) Node {
 	if int64(v) < minImm || int64(v) > maxImm {
 		panic(v)
 	}
 
-	return op | Opcode(v)<<argShift
+	return Node{op: op | Opcode(v)<<argShift}
 }
 
-// MakeFlt packs v into the opcode itself, tagged FltLit. The low 8 mantissa bits
-// make room for the tag, so v is stored to ~44 mantissa bits (magnitude exact,
-// ~13 significant digits). The +0x80 rounds to nearest instead of truncating,
-// halving the error; the carry propagates correctly into the exponent.
-func MakeFlt(v float64) Opcode {
-	return FltLit | Opcode(math.Float64bits(v)+0x80)&^opMask
+// MakeInt and MakeFlt carry the value in the meta word, so a literal is the
+// number the caller wrote, to the last bit.
+func MakeInt(v int64) Node {
+	return Node{op: IntLit, meta: Opcode(v)}
 }
 
-func (op Opcode) Op() Opcode   { return op & opMask }
-func (op Opcode) Imm() int64   { return int64(op) >> argShift }
-func (op Opcode) Arg() int64   { return int64(op >> argShift & argMask) }
-func (op Opcode) Off() int64   { return int64(op >> offShift & offMask) }
-func (op Opcode) Flt() float64 { return math.Float64frombits(uint64(op &^ opMask)) }
+func MakeFlt(v float64) Node {
+	return Node{op: FltLit, meta: Opcode(math.Float64bits(v))}
+}
+
+func (op Opcode) Op() Opcode { return op & opMask }
+func (op Opcode) Imm() int64 { return int64(op) >> argShift }
+func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
+func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
 
 // OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
 // lengths; the payload fields are far below math.MaxInt on any real program.
@@ -292,3 +303,53 @@ func (op Opcode) ArgInt() int { return int(op.Arg()) }
 func (op Opcode) ImmInt() int { return int(op.Imm()) }
 
 func (op Opcode) SpanInt() (off, end int) { off = op.OffInt(); return off, off + op.ArgInt() }
+
+// Op is the node's opcode, the kind to switch on. Imm, Arg, Off and the Int
+// variants read the opcode payload; Int and Flt read a literal's value.
+func (n Node) Op() Opcode   { return n.op.Op() }
+func (n Node) Imm() int64   { return n.op.Imm() }
+func (n Node) Arg() int64   { return n.op.Arg() }
+func (n Node) Off() int64   { return n.op.Off() }
+func (n Node) Int() int64   { return int64(n.meta) }
+func (n Node) Flt() float64 { return math.Float64frombits(uint64(n.meta)) }
+
+func (n Node) OffInt() int { return n.op.OffInt() }
+func (n Node) ArgInt() int { return n.op.ArgInt() }
+func (n Node) ImmInt() int { return n.op.ImmInt() }
+
+func (n Node) SpanInt() (off, end int) { return n.op.SpanInt() }
+
+// IsNone reports whether n is nothing: the zero Node, which is what a lookup
+// that found no node returns. The zero value is the sentinel, so Node{} is how
+// you write one.
+func (n Node) IsNone() bool { return n.op.Op() == None }
+
+// Src is the node's span in the text it was parsed from: src[off:end] is the
+// JSON that produced it, quotes and all. ok is false for a node that never was
+// text — one a Writer synthesized, or a literal, which spends meta on its value.
+func (n Node) Src() (off, end int, ok bool) {
+	switch n.op.Op() {
+	case IntLit, FltLit, None:
+		return 0, 0, false
+	}
+
+	if n.meta == 0 {
+		return 0, 0, false
+	}
+
+	off, end = n.meta.SpanInt()
+
+	return off, end, true
+}
+
+// withSrc records where n was read from. A zero-length span is dropped: meta
+// zero is what "no source" means, and no real token is empty.
+func (n Node) withSrc(off, end int) Node {
+	if end <= off {
+		return n
+	}
+
+	n.meta = pack(0, off, end-off)
+
+	return n
+}

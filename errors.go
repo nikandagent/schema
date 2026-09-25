@@ -9,17 +9,18 @@ import (
 
 type (
 	// Diag is one finding: Code says what went wrong, Op is the schema node it
-	// is about — the keyword, or the required entry — read through the owning
-	// document's Reader for the details (limit, types, name, ...), and Off/End
-	// locate the offending value in the source. Steps is the descent to the
-	// value, copied from Applier.Steps under SaveSteps, nil otherwise; its
-	// data keys live in the walk's data arena, so render it through the
-	// Applier that walked: a.Buffer.Reader().AppendPointer(w, d.Steps).
+	// is about — the keyword, or the required entry — and Val the offending
+	// value. Read either through its own arena for the details (limit, types,
+	// name, the value itself) and Src for where it sits in the text. Steps is
+	// the descent to the value, copied from Applier.Steps under SaveSteps, nil
+	// otherwise; its data keys live in the walk's data arena, so render it
+	// through the Applier that walked:
+	// a.Buffer.Reader().AppendPointer(w, d.Steps).
 	Diag struct {
-		Code     DiagCode
-		Op       Opcode
-		Off, End int
-		Steps    []Step
+		Code  DiagCode
+		Op    Node
+		Val   Node
+		Steps []Step
 	}
 
 	// DiagCode classifies a validation failure. The app switches on it and
@@ -74,11 +75,13 @@ const (
 	MustBeString
 	EmptyRef
 	DuplicateAnchor
+	DuplicateID
 	UnresolvedRef
 	NoResolver
 	BadPattern
 	UnknownKeyword
 	UnsupportedKeyword
+	UnsupportedFormat
 )
 
 // UserDiagBase is the first DiagCode reserved for application use. A Walk handler
@@ -123,11 +126,13 @@ var diagText = [...]string{
 	MustBeString:       "must be a string",
 	EmptyRef:           `"$ref" must not be empty`,
 	DuplicateAnchor:    "duplicate $anchor",
+	DuplicateID:        "duplicate $id",
 	UnresolvedRef:      "not found",
 	NoResolver:         "no resolver",
 	BadPattern:         "invalid regular expression",
 	UnknownKeyword:     "unknown keyword",
 	UnsupportedKeyword: "unsupported keyword",
+	UnsupportedFormat:  "unsupported format",
 }
 
 func (c DiagCode) String() string {
@@ -169,13 +174,13 @@ func (c DiagCode) Category() error {
 	case SchemaMustBeObject, InvalidTypeShape, UnknownType, MustBeObject, MustBeArray, RequiredNotString,
 		MustBeNumber, MustBeInteger, MustBeBool, MustBeString, EmptyRef:
 		return ErrKeyword
-	case DuplicateAnchor, UnresolvedRef, NoResolver:
+	case DuplicateAnchor, DuplicateID, UnresolvedRef, NoResolver:
 		return ErrRef
 	case BadPattern:
 		return ErrPattern
 	case UnknownKeyword:
 		return ErrUnknownKeyword
-	case UnsupportedKeyword:
+	case UnsupportedKeyword, UnsupportedFormat:
 		return ErrUnsupported
 	default:
 		return ErrInvalid
@@ -193,7 +198,8 @@ func (e Diagnostics) FormatNicely(w, src []byte) []byte { return e.FormatNicelyC
 //	..._up to before here_}_up to after here...
 //	                      ^ Message here
 func (d Diag) FormatNicelyContext(w, src []byte, before, after int) []byte {
-	off, end := clampSpan(d.Off, d.End, len(src))
+	off, end := d.span()
+	off, end = clampSpan(off, end, len(src))
 
 	// An "..." is 3 chars, so eliding 3 or fewer saves nothing — show the source.
 	start := max(off-before, 0)
@@ -326,8 +332,29 @@ func normSyntax(err error) error {
 	return err
 }
 
-// serr is a schema-side failure: one finding at the offending keyword op (None
-// if none) and its span in the schema source, off plus length n.
-func serr(code DiagCode, op Opcode, off, n int) error {
-	return Diagnostics{{Code: code, Op: op, Off: off, End: off + n}}
+// span is where a rendering points: the offending value, or the keyword itself
+// when there is no value — a schema that would not compile. Which text that is
+// depends on which node answered, so nothing but FormatNicely uses it; a caller
+// asks the node it means, d.Val.Src or d.Op.Src.
+func (d Diag) span() (off, end int) {
+	if off, end, ok := d.Val.Src(); ok {
+		return off, end
+	}
+
+	off, end, _ = d.Op.Src()
+
+	return off, end
+}
+
+// kerr is a schema-side failure about a keyword that has no node yet: the kind
+// is all we can say about it here. locate stamps the place on the way out, from
+// the level that knows the whole "key": value pair.
+func kerr(code DiagCode, kind Opcode) error {
+	return serr(code, Node{op: kind})
+}
+
+// serr is a schema-side failure about op, which carries its own place in the
+// schema text.
+func serr(code DiagCode, op Node) error {
+	return Diagnostics{{Code: code, Op: op}}
 }

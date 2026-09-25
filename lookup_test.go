@@ -134,11 +134,12 @@ func TestLookupNotFound(tb *testing.T) {
 			continue
 		}
 
-		if d[0].Code != UnresolvedRef && d[0].Code != NoResolver || d[0].Off != 0 || d[0].End != 0 {
-			tb.Errorf("lookup %q: diag %+v, want UnresolvedRef at 0:0", ref, d[0])
+		off, end := d[0].opSpan()
+		if d[0].Code != UnresolvedRef && d[0].Code != NoResolver || off != 0 || end != 0 {
+			tb.Errorf("lookup %q: diag %+v span %d:%d, want UnresolvedRef at 0:0", ref, d[0], off, end)
 		}
 
-		if node != None {
+		if node.Op() != None {
 			tb.Errorf("lookup %q: node %v, want None", ref, node)
 		}
 	}

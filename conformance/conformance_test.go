@@ -37,9 +37,10 @@ var unsupported = map[string]string{
 }
 
 // unimplementedFormats marks the optional/format files naming a format we do not
-// assert. Left in, strict compile refuses every one of their schemas as an
-// unknown keyword, so they would all land in rejected and say nothing about
-// formats; naming them here says which format is missing instead.
+// assert. An unimplemented name is an inert annotation, so their valid cases
+// would pass vacuously and their invalid ones fail; naming them here says which
+// format is missing. unknown.json is not among them: asserting that an unknown
+// format is ignored is exactly what we do.
 var unimplementedFormats = map[string]string{
 	"duration.json":              "duration not implemented",
 	"hostname.json":              "hostname dropped: needs IDNA tables for the idn sibling",
@@ -54,12 +55,17 @@ var unimplementedFormats = map[string]string{
 	"relative-json-pointer.json": "relative-json-pointer not implemented",
 	"regex.json":                 "regex not implemented",
 	"ecmascript-regex.json":      "format regex, and the ECMA-262 dialect at that",
-	"unknown.json":               "asserts an unknown format is ignored, which is the default path",
 }
 
 // strict is the compile flag set the suites run under: a keyword we do not know
 // or do not implement is a compile error, not a silent pass.
 const strict = schema.SchemaRejectUnknown | schema.SchemaRejectUnsupported
+
+// formatStrict drops SchemaRejectUnsupported: an unimplemented format value is
+// the spec's own annotation case, and the files that name one are skipped by
+// name anyway, so refusing it by flag would only hide unknown.json — which
+// asserts exactly the behaviour we have.
+const formatStrict = strict &^ schema.SchemaRejectUnsupported
 
 func TestConformance(tb *testing.T) {
 	passed, ran, rejected, skipped := runSuite(tb, "testdata/suite/tests/*.json", strict, unsupported, suiteValid)
@@ -71,13 +77,13 @@ func TestConformance(tb *testing.T) {
 func TestFormatConformance(tb *testing.T) {
 	const glob = "testdata/suite/tests/optional/format/*.json"
 
-	passed, ran, rejected, skipped := runSuite(tb, glob, strict|schema.AssertStringFormat, unimplementedFormats, suiteValid)
+	passed, ran, rejected, skipped := runSuite(tb, glob, formatStrict|schema.AssertStringFormat, unimplementedFormats, suiteValid)
 
 	tb.Logf("format: passed %d / ran %d, rejected %d (unimplemented), skipped %d",
 		passed, ran, rejected, skipped)
 
 	// without the flag "format" is an annotation, so every case validates
-	passed, ran, rejected, skipped = runSuite(tb, glob, strict, unimplementedFormats, alwaysValid)
+	passed, ran, rejected, skipped = runSuite(tb, glob, formatStrict, unimplementedFormats, alwaysValid)
 
 	tb.Logf("format as annotation: passed %d / ran %d, rejected %d (unimplemented), skipped %d",
 		passed, ran, rejected, skipped)
@@ -211,9 +217,16 @@ func rejectsCleanly(err error) bool {
 	}
 
 	d := schema.AsDiag(err)
+	if len(d) != 1 {
+		return false
+	}
 
-	return len(d) == 1 &&
-		(d[0].Code == schema.UnknownKeyword || d[0].Code == schema.UnsupportedKeyword)
+	switch d[0].Code {
+	case schema.UnknownKeyword, schema.UnsupportedKeyword, schema.UnsupportedFormat:
+		return true
+	}
+
+	return false
 }
 
 func validates(a *schema.Applier, s *schema.Schema, c suiteCase) bool {

@@ -296,7 +296,7 @@ func TestRewriteFlags(tb *testing.T) {
 }
 
 func TestWalk(tb *testing.T) {
-	delegate := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(s, op, val, h) }
+	delegate := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) { return c.Apply(s, op, val, h) }
 
 	// 1. delegating handler reproduces default Validate.
 	for _, tc := range []struct {
@@ -334,14 +334,14 @@ func TestWalk(tb *testing.T) {
 	myErr := errors.New("boom")
 	s, _ := Compile([]byte(`{"type":"string"}`))
 
-	fail := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) { return 0, myErr }
+	fail := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) { return Node{}, myErr }
 	if _, err := walk(s, []byte(`"x"`), fail); !errors.Is(err, myErr) {
 		tb.Errorf("custom error: got %v, want %v", err, myErr)
 	}
 
 	// 3. ErrBreak is a clean stop; traversal halts before recursing.
 	n := 0
-	brk := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	brk := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		n++
 		return val, ErrBreak
 	}
@@ -352,7 +352,7 @@ func TestWalk(tb *testing.T) {
 	}
 
 	// 4. c.Fail records the verdict in a diag; ErrBreak is swallowed, so err is nil.
-	rep := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	rep := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		c.Fail(diagHandlerSaysNo, op, val)
 		return val, ErrBreak
 	}
@@ -363,7 +363,7 @@ func TestWalk(tb *testing.T) {
 }
 
 func TestWalkRewrite(tb *testing.T) {
-	delegate := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(s, op, val, h) }
+	delegate := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) { return c.Apply(s, op, val, h) }
 
 	// delegating handler reproduces the default rewrite: fills defaults, reorders.
 	for _, tc := range []struct{ schema, in, out string }{
@@ -391,7 +391,7 @@ func TestWalkRewrite(tb *testing.T) {
 	myErr := errors.New("boom")
 	s, _ := Compile([]byte(`{"type":"object"}`))
 
-	fail := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) { return 0, myErr }
+	fail := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) { return Node{}, myErr }
 	if _, _, err := rewrite(s, nil, []byte(`{}`), fail); !errors.Is(err, myErr) {
 		tb.Errorf("walkrewrite custom error: got %v, want %v", err, myErr)
 	}
@@ -402,8 +402,8 @@ func TestWalkRead(tb *testing.T) {
 	// delegating, so validation is unchanged.
 	got := map[string]bool{}
 
-	var collect func(b BufferReader, val Opcode)
-	collect = func(b BufferReader, val Opcode) {
+	var collect func(b BufferReader, val Node)
+	collect = func(b BufferReader, val Node) {
 		switch val.Op() {
 		case Number, String:
 			got[string(b.Span(val))] = true
@@ -424,7 +424,7 @@ func TestWalkRead(tb *testing.T) {
 		}
 	}
 
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		collect(c.Buffer.Reader(), val)
 		return c.Apply(s, op, val, h)
 	}
@@ -457,7 +457,7 @@ func TestWalkSchemaBuf(tb *testing.T) {
 	// words (key, subschema, ...) for its n declared properties.
 	var saw bool
 
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if op.Op() == Properties {
 			saw = true
 
@@ -653,7 +653,7 @@ func TestXHook(tb *testing.T) {
 
 	// The x-type:upper keyword is now an inert Ext node; a Walk handler detects it
 	// and uppercases the governed string value, replacing the old registered hook.
-	upper := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	upper := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if op.Op() != Ext {
 			return c.Apply(s, op, val, h)
 		}
@@ -727,7 +727,7 @@ func TestXTypeIDToObject(tb *testing.T) {
 	// {"entity": <string>, "version": <int>} object; version is omitted when it is
 	// 0 or absent. A sibling type:string check runs first (on the still-string
 	// value), so it passes before the Ext swaps in the object.
-	idToObject := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	idToObject := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if op.Op() != Ext {
 			return c.Apply(s, op, val, h)
 		}
@@ -744,7 +744,7 @@ func TestXTypeIDToObject(tb *testing.T) {
 		entity, ver, _ := strings.Cut(string(c.Buffer.Reader().String(val)), "/")
 
 		w := c.Buffer.Writer()
-		kv := []Opcode{w.Bytes([]byte("entity")), w.Bytes([]byte(entity))}
+		kv := []Node{w.Bytes([]byte("entity")), w.Bytes([]byte(entity))}
 
 		if n, _ := strconv.Atoi(ver); n != 0 {
 			kv = append(kv, w.Bytes([]byte("version")), MakeInt(int64(n)))
@@ -785,7 +785,7 @@ func TestWalkFromJSON(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if val.Op() == Number {
 			return c.Buffer.Writer().FromJSON([]byte(`{"wrapped":5}`))
 		}
@@ -811,7 +811,7 @@ func TestWalkEmitArray(tb *testing.T) {
 		tb.Fatal(err)
 	}
 
-	repl := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	repl := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if val.Op() == Number {
 			return c.Buffer.Writer().Span(Number, []byte("42")), nil
 		}
@@ -829,7 +829,7 @@ func TestWalkEmitArray(tb *testing.T) {
 	}
 
 	// structural sharing: a pure delegate leaves the input byte-identical.
-	pass := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) { return c.Apply(s, op, val, h) }
+	pass := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) { return c.Apply(s, op, val, h) }
 
 	out, _, err = rewrite(s, nil, []byte(`[1,2,3]`), pass)
 	if err != nil {
@@ -859,7 +859,7 @@ func TestWalkEmit(tb *testing.T) {
 			continue
 		}
 
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if val.Op() == tc.emit {
 				return c.Buffer.Writer().Span(tc.emit, []byte(tc.bytes)), nil
 			}
@@ -905,13 +905,13 @@ func TestWalkHandlerSwap(tb *testing.T) {
 	}
 
 	var seen int
-	self := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	self := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		seen++
 		return c.Apply(s, op, val, h)
 	}
 
 	var top int
-	cut := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	cut := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		top++
 		return c.Apply(s, op, val, nil) // descendants fall to default; handler not re-entered
 	}
@@ -946,7 +946,7 @@ func TestWalkFilterDiags(tb *testing.T) {
 	}
 
 	// Suppress diagnostics raised anywhere under property "b".
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		mark := len(c.Diags)
 
 		nv, err := c.Apply(s, op, val, h)
@@ -979,40 +979,40 @@ func TestWalkFilterDiags(tb *testing.T) {
 // decoded ones. Such values carry no source span, so the keyword checks must
 // treat them as first-class rather than panic reaching for their bytes.
 func TestSynthesized(tb *testing.T) {
-	obj := func(w BufferWriter) Opcode { return w.Object(w.String("k"), w.String("v")) }
+	obj := func(w BufferWriter) Node { return w.Object(w.String("k"), w.String("v")) }
 
 	for _, tc := range []struct {
 		schema string
-		make   func(BufferWriter) Opcode
+		make   func(BufferWriter) Node
 		ok     bool
 	}{
-		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Int(5) }, true},
-		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Float(2) }, true},
-		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.Float(1.5) }, false},
-		{`{"type":"number"}`, func(w BufferWriter) Opcode { return w.Float(1.5) }, true},
-		{`{"type":"string"}`, func(w BufferWriter) Opcode { return w.Int(5) }, false},
-		{`{"type":"integer"}`, func(w BufferWriter) Opcode { return w.String("x") }, false},
-		{`{"minLength":2}`, func(w BufferWriter) Opcode { return w.String("xy") }, true},
-		{`{"minLength":2}`, func(w BufferWriter) Opcode { return w.String("x") }, false},
-		{`{"pattern":"^a+$"}`, func(w BufferWriter) Opcode { return w.String("aaa") }, true},
-		{`{"pattern":"^a+$"}`, func(w BufferWriter) Opcode { return w.String("b") }, false},
+		{`{"type":"integer"}`, func(w BufferWriter) Node { return w.Int(5) }, true},
+		{`{"type":"integer"}`, func(w BufferWriter) Node { return w.Float(2) }, true},
+		{`{"type":"integer"}`, func(w BufferWriter) Node { return w.Float(1.5) }, false},
+		{`{"type":"number"}`, func(w BufferWriter) Node { return w.Float(1.5) }, true},
+		{`{"type":"string"}`, func(w BufferWriter) Node { return w.Int(5) }, false},
+		{`{"type":"integer"}`, func(w BufferWriter) Node { return w.String("x") }, false},
+		{`{"minLength":2}`, func(w BufferWriter) Node { return w.String("xy") }, true},
+		{`{"minLength":2}`, func(w BufferWriter) Node { return w.String("x") }, false},
+		{`{"pattern":"^a+$"}`, func(w BufferWriter) Node { return w.String("aaa") }, true},
+		{`{"pattern":"^a+$"}`, func(w BufferWriter) Node { return w.String("b") }, false},
 		{`{"type":"object"}`, obj, true},
 		{`{"type":"string"}`, obj, false},
-		{`{"minimum":10}`, func(w BufferWriter) Opcode { return w.Int(10) }, true},
-		{`{"minimum":10}`, func(w BufferWriter) Opcode { return w.Int(9) }, false},
-		{`{"exclusiveMaximum":10}`, func(w BufferWriter) Opcode { return w.Float(9.5) }, true},
-		{`{"exclusiveMaximum":10}`, func(w BufferWriter) Opcode { return w.Float(10) }, false},
-		{`{"multipleOf":3}`, func(w BufferWriter) Opcode { return w.Int(9) }, true},
-		{`{"multipleOf":3}`, func(w BufferWriter) Opcode { return w.Int(10) }, false},
-		{`{"multipleOf":0.5}`, func(w BufferWriter) Opcode { return w.Int(7) }, true},
-		{`{"multipleOf":0.145}`, func(w BufferWriter) Opcode { return w.Span(Number, []byte("4.35")) }, true},
-		{`{"multipleOf":0.145}`, func(w BufferWriter) Opcode { return w.Span(Number, []byte("4.4")) }, false},
-		{`{"multipleOf":2}`, func(w BufferWriter) Opcode { return w.Int(-4) }, true},
-		{`{"multipleOf":2}`, func(w BufferWriter) Opcode { return w.Int(-5) }, false},
-		{`{"const":5}`, func(w BufferWriter) Opcode { return w.Int(5) }, true},
-		{`{"const":5}`, func(w BufferWriter) Opcode { return w.Int(6) }, false},
-		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Opcode { return w.Float(2.5) }, true},
-		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Opcode { return w.Int(3) }, false},
+		{`{"minimum":10}`, func(w BufferWriter) Node { return w.Int(10) }, true},
+		{`{"minimum":10}`, func(w BufferWriter) Node { return w.Int(9) }, false},
+		{`{"exclusiveMaximum":10}`, func(w BufferWriter) Node { return w.Float(9.5) }, true},
+		{`{"exclusiveMaximum":10}`, func(w BufferWriter) Node { return w.Float(10) }, false},
+		{`{"multipleOf":3}`, func(w BufferWriter) Node { return w.Int(9) }, true},
+		{`{"multipleOf":3}`, func(w BufferWriter) Node { return w.Int(10) }, false},
+		{`{"multipleOf":0.5}`, func(w BufferWriter) Node { return w.Int(7) }, true},
+		{`{"multipleOf":0.145}`, func(w BufferWriter) Node { return w.Span(Number, []byte("4.35")) }, true},
+		{`{"multipleOf":0.145}`, func(w BufferWriter) Node { return w.Span(Number, []byte("4.4")) }, false},
+		{`{"multipleOf":2}`, func(w BufferWriter) Node { return w.Int(-4) }, true},
+		{`{"multipleOf":2}`, func(w BufferWriter) Node { return w.Int(-5) }, false},
+		{`{"const":5}`, func(w BufferWriter) Node { return w.Int(5) }, true},
+		{`{"const":5}`, func(w BufferWriter) Node { return w.Int(6) }, false},
+		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Node { return w.Float(2.5) }, true},
+		{`{"enum":[1,2.5,"x"]}`, func(w BufferWriter) Node { return w.Int(3) }, false},
 		{`{"const":{"k":"v"}}`, obj, true},
 	} {
 		s, err := Compile([]byte(tc.schema))
@@ -1022,7 +1022,7 @@ func TestSynthesized(tb *testing.T) {
 		}
 
 		first := true
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if first {
 				first, val = false, tc.make(c.Buffer.Writer())
 			}
@@ -1040,10 +1040,16 @@ func TestSynthesized(tb *testing.T) {
 			tb.Errorf("walk synthesized against %s: ok=%v diag=%v", tc.schema, tc.ok, d)
 		}
 
-		// A synthesized value has no source, so the diagnostic points nowhere
-		// rather than at a bogus offset.
-		if len(d) != 0 && (d[0].Off != 0 || d[0].End != 0) {
-			tb.Errorf("walk synthesized against %s: span=%d:%d, want 0:0", tc.schema, d[0].Off, d[0].End)
+		// A synthesized value never was text, so it has no place in the document —
+		// the keyword it failed still has its place in the schema.
+		if len(d) != 0 {
+			if off, end, ok := d[0].Val.Src(); ok {
+				tb.Errorf("walk synthesized against %s: value span=%d:%d, want none", tc.schema, off, end)
+			}
+
+			if _, _, ok := d[0].Op.Src(); !ok {
+				tb.Errorf("walk synthesized against %s: the keyword has no place in the schema", tc.schema)
+			}
 		}
 	}
 }
@@ -1120,7 +1126,7 @@ func TestStepsRef(tb *testing.T) {
 	}
 
 	seen := false
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		if op.Op() == Type {
 			seen = true
 
@@ -1129,7 +1135,7 @@ func TestStepsRef(tb *testing.T) {
 			}
 
 			st := c.Steps[2]
-			if st.Op.Op() != Ref || st.Value.Op() != Ref || st.DataKey != None {
+			if st.Op.Op() != Ref || st.Value.Op() != Ref || st.DataKey.Op() != None {
 				tb.Errorf("ref step: Op=%v Value=%v DataKey=%v, want Ref Ref None", st.Op.Op(), st.Value.Op(), st.DataKey)
 			}
 			if st.Doc != s {
@@ -1165,7 +1171,7 @@ func TestStepsExternalRef(tb *testing.T) {
 	}
 
 	seen := false
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		// the handler is told which document the node lives in: the referrer
 		// before the $ref, the registered one after it
 		if op.Op() == Properties && s != &root {
@@ -1184,7 +1190,7 @@ func TestStepsExternalRef(tb *testing.T) {
 			}
 
 			ref := c.Steps[len(c.Steps)-1]
-			if ref.Op.Op() != Ref || ref.DataKey != None {
+			if ref.Op.Op() != Ref || ref.DataKey.Op() != None {
 				tb.Errorf("ref step: Op=%v DataKey=%v, want Ref None", ref.Op.Op(), ref.DataKey)
 			}
 			if ref.Doc != common {
@@ -1220,7 +1226,7 @@ func TestStepsDepth(tb *testing.T) {
 		}
 
 		seen := false
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Type && val.Op() == String {
 				seen = true
 
@@ -1260,7 +1266,7 @@ func TestDiagCollector(tb *testing.T) {
 
 	// A finding an outer frame re-sees is already recorded, at the frame that
 	// raised it; anything else is new and claims that slot.
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		n := len(c.Diags)
 
 		v, err := c.Apply(s, op, val, h)
@@ -1319,7 +1325,7 @@ func TestHandlerKeyword(tb *testing.T) {
 	var types Types
 	var minlen, maxlen int64
 
-	h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+	h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 		switch op.Op() {
 		case Type:
 			types = TypesOf(op)
@@ -1349,7 +1355,7 @@ func TestHandlerKeyword(tb *testing.T) {
 }
 
 func sameDiag(a, b Diag) bool {
-	return a.Code == b.Code && a.Op == b.Op && a.Off == b.Off && a.End == b.End
+	return a.Code == b.Code && a.Op == b.Op && a.Val == b.Val
 }
 
 func TestSaveSteps(tb *testing.T) {
@@ -1402,7 +1408,7 @@ func TestSaveSteps(tb *testing.T) {
 		}
 	}
 
-	if ref := d[1].Steps[1]; ref.Op.Op() != Ref || ref.DataKey != None {
+	if ref := d[1].Steps[1]; ref.Op.Op() != Ref || ref.DataKey.Op() != None {
 		tb.Errorf("ref step: Op=%v DataKey=%v, want Ref None", ref.Op.Op(), ref.DataKey)
 	}
 
@@ -1422,13 +1428,13 @@ func validate(s *Schema, doc []byte) ([]Diag, error) {
 func walk(s *Schema, doc []byte, h Handler) ([]Diag, error) {
 	var a Applier
 
-	return a.Walk(s, None, doc, h)
+	return a.Walk(s, Node{}, doc, h)
 }
 
 func rewrite(s *Schema, buf, doc []byte, h Handler) ([]byte, []Diag, error) {
 	var a Applier
 
-	return a.Rewrite(s, None, doc, buf, h)
+	return a.Rewrite(s, Node{}, doc, buf, h)
 }
 
 // found renders each diag as "message@<located source>" so a test can assert the
@@ -1436,7 +1442,8 @@ func rewrite(s *Schema, buf, doc []byte, h Handler) ([]byte, []Diag, error) {
 func found(doc []byte, d []Diag) []string {
 	out := make([]string, 0, len(d))
 	for _, x := range d {
-		out = append(out, x.Code.String()+"@"+string(doc[x.Off:x.End]))
+		off, end := x.valSpan()
+		out = append(out, x.Code.String()+"@"+string(doc[off:end]))
 	}
 
 	sort.Strings(out)
@@ -1506,7 +1513,7 @@ func TestWalkFragment(tb *testing.T) {
 
 	// the same document from the root: the fragment's keywords no longer govern
 	// it, and the root's required does
-	d, err := a.Walk(sc, None, []byte(`{"kind":"a","n":"x"}`), nil)
+	d, err := a.Walk(sc, Node{}, []byte(`{"kind":"a","n":"x"}`), nil)
 	if err != nil {
 		tb.Fatalf("root: %v", err)
 	}

@@ -91,7 +91,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"type":"object","required":["a"]}`)
 
 		seen := false
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Required {
 				seen = true
 
@@ -119,7 +119,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"a":{"type":"string"}}}`)
 
 		seen := false
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Type {
 				seen = true
 
@@ -157,7 +157,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"items":{"type":"number"}}`)
 
 		var ptr []string
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Type {
 				if c.Depth != 1 || c.Steps[0].DataKey.Op() != IntLit {
 					tb.Fatalf("item Type: Depth=%d key=%v, want 1 IntLit", c.Depth, c.Steps[0].DataKey.Op())
@@ -182,7 +182,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"items":{"items":{"properties":{"deep":{"type":"string"}}}}}}`)
 
 		seen := false
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Type {
 				seen = true
 
@@ -210,14 +210,14 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"allOf":[{"required":["a"]}]}`)
 
 		seen := false
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Required {
 				seen = true
 
 				if c.Depth != 0 || len(c.Steps) != 1 {
 					tb.Errorf("allOf Required: Depth=%d Steps=%d, want 0 1", c.Depth, len(c.Steps))
 				}
-				if st := c.Steps[0]; st.Op.Op() != AllOf || st.DataKey != None {
+				if st := c.Steps[0]; st.Op.Op() != AllOf || st.DataKey.Op() != None {
 					tb.Errorf("allOf step: Op=%v DataKey=%v, want AllOf None", st.Op.Op(), st.DataKey)
 				}
 				if got := string(c.Buffer.Reader().AppendPointer(nil, c.Steps)); got != "." {
@@ -241,7 +241,7 @@ func TestPath(tb *testing.T) {
 		sc := compile(`{"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`)
 
 		var depths []int
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Type {
 				depths = append(depths, c.Depth)
 			}
@@ -261,7 +261,7 @@ func TestPath(tb *testing.T) {
 	{
 		sc := compile(`{"required":["x"],"properties":{"obj":{"required":["y"]}}}`)
 
-		h := func(c *Applier, s *Schema, op, val Opcode, h Handler) (Opcode, error) {
+		h := func(c *Applier, s *Schema, op, val Node, h Handler) (Node, error) {
 			if op.Op() == Required && c.Depth == 0 {
 				return val, nil
 			}
@@ -305,8 +305,9 @@ func TestDiagSpan(tb *testing.T) {
 		data := `{"n":123}`
 		d := one(`{"properties":{"n":{"type":"string"}}}`, data)
 
-		if got := data[d.Off:d.End]; got != "123" {
-			tb.Errorf("scalar span %q [%d,%d), want %q", got, d.Off, d.End, "123")
+		off, end := d.valSpan()
+		if got := data[off:end]; got != "123" {
+			tb.Errorf("scalar span %q [%d,%d), want %q", got, off, end, "123")
 		}
 	}
 
@@ -316,13 +317,14 @@ func TestDiagSpan(tb *testing.T) {
 		want := strings.IndexByte(data, '[') // 8
 		d := one(`{"properties":{"tags":{"type":"array","minItems":2}}}`, data)
 
-		if d.Off != want {
-			tb.Errorf("array Off=%d, want %d", d.Off, want)
+		off, end := d.valSpan()
+		if off != want {
+			tb.Errorf("array off=%d, want %d", off, want)
 		}
-		if data[d.Off] != '[' {
-			tb.Errorf("array Off points at %q, want '['", data[d.Off])
+		if data[off] != '[' {
+			tb.Errorf("array off points at %q, want '['", data[off])
 		}
-		if got := data[d.Off:d.End]; got != "[1]" {
+		if got := data[off:end]; got != "[1]" {
 			tb.Errorf("array span %q, want %q", got, "[1]")
 		}
 	}
@@ -336,11 +338,12 @@ func TestDiagSpan(tb *testing.T) {
 		if want != 5 {
 			tb.Fatalf("test setup: inner brace index %d, want 5", want)
 		}
-		if d.Off != want {
-			tb.Errorf("object Off=%d, want %d (inner brace)", d.Off, want)
+		off, _ := d.valSpan()
+		if off != want {
+			tb.Errorf("object off=%d, want %d (inner brace)", off, want)
 		}
-		if data[d.Off] != '{' {
-			tb.Errorf("object Off points at %q, want '{'", data[d.Off])
+		if data[off] != '{' {
+			tb.Errorf("object off points at %q, want '{'", data[off])
 		}
 	}
 
@@ -349,8 +352,9 @@ func TestDiagSpan(tb *testing.T) {
 		data := `{"a":1}`
 		d := one(`{"minProperties":5}`, data)
 
-		if d.Off != 0 || data[d.Off] != '{' {
-			tb.Errorf("root Off=%d (%q), want 0 '{'", d.Off, data[d.Off])
+		off, _ := d.valSpan()
+		if off != 0 || data[off] != '{' {
+			tb.Errorf("root off=%d (%q), want 0 '{'", off, data[off])
 		}
 	}
 
@@ -371,11 +375,13 @@ func TestDiagSpan(tb *testing.T) {
 		}
 
 		for i, want := range []int{1, 4} {
-			if diag[i].Off != want {
-				tb.Errorf("element %d Off=%d, want %d", i, diag[i].Off, want)
+			off, _ := diag[i].valSpan()
+
+			if off != want {
+				tb.Errorf("element %d off=%d, want %d", i, off, want)
 			}
-			if data[diag[i].Off] != '{' {
-				tb.Errorf("element %d Off points at %q, want '{'", i, data[diag[i].Off])
+			if data[off] != '{' {
+				tb.Errorf("element %d off points at %q, want '{'", i, data[off])
 			}
 		}
 	}
@@ -400,10 +406,13 @@ func TestDiagSpanExtra(tb *testing.T) {
 
 		got := map[string]bool{}
 		for _, d := range diag {
-			if d.End <= d.Off {
-				tb.Errorf("literal diag not a real span: [%d,%d)", d.Off, d.End)
+			off, end := d.valSpan()
+
+			if end <= off {
+				tb.Errorf("literal diag not a real span: [%d,%d)", off, end)
 			}
-			got[data[d.Off:d.End]] = true
+
+			got[data[off:end]] = true
 		}
 
 		if !got["null"] || !got["true"] {
@@ -411,7 +420,7 @@ func TestDiagSpanExtra(tb *testing.T) {
 		}
 	}
 
-	// 2. Container diags span the full extent [Off,End).
+	// 2. Container diags span the full extent.
 	{
 		var s Schema
 		if err := s.Compile([]byte(`{"properties":{"o":{"type":"object","minProperties":3}},"minProperties":9}`)); err != nil {
@@ -429,7 +438,8 @@ func TestDiagSpanExtra(tb *testing.T) {
 
 		got := map[string]bool{}
 		for _, d := range diag {
-			got[data[d.Off:d.End]] = true
+			off, end := d.valSpan()
+			got[data[off:end]] = true
 		}
 
 		if !got[data] {

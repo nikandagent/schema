@@ -12,7 +12,7 @@ import (
 type (
 	def struct {
 		name string // full pointer, e.g. "#/$defs/Name"
-		root Opcode
+		root Node
 	}
 )
 
@@ -114,49 +114,42 @@ func (s *Schema) register() {
 	}
 }
 
-// rootID reads the document's own base URI from a top-level $id, kept as a Raw.
+// rootID reads the document's own base URI from a top-level $id.
 func (s *Schema) rootID() {
 	if s.root.Op() != All {
 		return
 	}
 
-	for _, ch := range s.prog.Reader().Nodes(s.root) {
-		if ch.Op() != Raw {
-			continue
-		}
-
-		if string(s.prog.Reader().String(s.prog.code[ch.Off()])) == "$id" {
-			s.ID = string(s.prog.Reader().String(s.prog.code[ch.Off()+1]))
-			return
-		}
+	if id := s.prog.Reader().Keyword(s.root, ID); id.op != None {
+		s.ID = string(s.prog.Reader().String(id))
 	}
 }
 
-func (s *Schema) compile(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) compile(b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	switch tp {
 	case json2.Object:
 		return s.object(b, i)
 	case json2.Bool:
-		op := Fail
+		op := Node{op: Fail}
 		if b[i] == 't' {
-			op = Pass
+			op = Node{op: Pass}
 		}
 
 		i, err = d.Skip(b, i)
 		return op, i, err
 	default:
-		return 0, i, serr(SchemaMustBeObject, None, i, 0)
+		return Node{}, i, kerr(SchemaMustBeObject, None)
 	}
 }
 
-func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) object(b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -164,11 +157,11 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 
 	i, err := d.Enter(b, st, json2.Object)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	var key []byte
-	var op, anchor Opcode
+	var op, anchor, id Node
 	var hasAnchor bool
 
 	for d.ForMore(b, &i, json2.Object, &err) {
@@ -176,24 +169,33 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 
 		key, i, err = d.Key(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
+
+		vst := i
 
 		op, i, err = s.keyword(key, b, kst, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, locate(err, kst, s.pairEnd(b, vst, i))
 		}
 
-		if op != Pass {
+		// Every keyword remembers the "key": value pair it was written as, so a
+		// finding can point back into the schema text.
+		op = op.withSrc(kst, i)
+
+		if op.op != Pass {
 			s.prog.tmp = append(s.prog.tmp, op)
 		}
 
-		if string(key) == "$anchor" {
+		switch string(key) {
+		case "$anchor":
 			anchor, hasAnchor = op, true // op is the Raw{key,val}; val is the anchor name
+		case "$id":
+			id = op // an ID node: the URI is its own string
 		}
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	s.mergeDefs(mark)
@@ -211,25 +213,35 @@ func (s *Schema) object(b []byte, st int) (Opcode, int, error) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, s.prog.tmp[mark:]...)
 
-	node := makeNode(All, off, n)
+	node := makeNode(All, off, n).withSrc(st, i)
 
 	if hasAnchor {
-		val := s.prog.code[anchor.Off()+1]
-		name := string(s.prog.Reader().String(val))
-		frag := "#" + name
+		frag := "#" + string(s.prog.Reader().String(s.prog.code[anchor.Off()+1]))
 
-		if s.fragTarget(frag) != None {
-			off, end := val.SpanInt()
-			return 0, i, serr(DuplicateAnchor, anchor, off, end-off)
+		if s.fragTarget(frag).op != None {
+			return Node{}, i, serr(DuplicateAnchor, anchor)
 		}
 
 		s.defs = append(s.defs, def{frag, node})
 	}
 
+	// A schema that names itself is a resource of its own: register the URI so a
+	// $ref to it resolves here instead of going out to the registry. The root
+	// also becomes the document's name, in rootID.
+	if id.op != None {
+		uri := string(s.prog.Reader().String(id))
+
+		if s.fragTarget(uri).op != None {
+			return Node{}, i, serr(DuplicateID, id)
+		}
+
+		s.defs = append(s.defs, def{uri, node})
+	}
+
 	return node, i, nil
 }
 
-func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
+func (s *Schema) keyword(name, b []byte, kst, st int) (Node, int, error) {
 	switch string(name) {
 	case "type":
 		return s.kwType(b, st)
@@ -293,6 +305,8 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 		return s.kwPattern(b, st)
 	case "format":
 		return s.kwFormat(name, b, kst, st)
+	case "$id":
+		return s.kwID(b, st)
 	case "$ref":
 		return s.kwRef(b, st)
 	case "$defs", "definitions":
@@ -302,12 +316,12 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Opcode, int, error) {
 	}
 }
 
-func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwType(b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	var mask Types
@@ -317,33 +331,33 @@ func (s *Schema) kwType(b []byte, st int) (Opcode, int, error) {
 	case json2.String:
 		name, i, err = d.Key(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		mask = typeBit(name)
 	case json2.Array:
 		i, err = d.Enter(b, i, json2.Array)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		for d.ForMore(b, &i, json2.Array, &err) {
 			name, i, err = d.Key(b, i)
 			if err != nil {
-				return 0, i, err
+				return Node{}, i, err
 			}
 
 			mask |= typeBit(name)
 		}
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 	default:
-		return 0, i, serr(InvalidTypeShape, Type, st, i-st)
+		return Node{}, i, kerr(InvalidTypeShape, Type)
 	}
 
 	if mask&typeErr != 0 {
-		return 0, i, serr(UnknownType, Type, st, i-st)
+		return Node{}, i, kerr(UnknownType, Type)
 	}
 
 	return makeImm(Type, int(mask)), i, nil
@@ -365,13 +379,13 @@ func (s *Schema) enterKind(b []byte, st int, typ json2.Type, op Opcode) (int, er
 			code = MustBeArray
 		}
 
-		return i, serr(code, op, st, i-st)
+		return i, kerr(code, op)
 	}
 
 	return d.Enter(b, st, typ)
 }
 
-func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwProps(b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -379,26 +393,26 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 
 	i, err := s.enterKind(b, st, json2.Object, Properties)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var key, sub Opcode
+	var key, sub Node
 
 	for d.ForMore(b, &i, json2.Object, &err) {
 		key, i, err = s.literal(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		sub, i, err = s.compile(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		s.prog.tmp = append(s.prog.tmp, key, sub)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n := (len(s.prog.tmp) - mark) / 2
@@ -410,7 +424,7 @@ func (s *Schema) kwProps(b []byte, st int) (Opcode, int, error) {
 
 // kwPatternProps parses patternProperties: a regex key (stored as a Pattern
 // span, compiled by checkPatterns like any other) paired with a subschema.
-func (s *Schema) kwPatternProps(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwPatternProps(b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -418,26 +432,26 @@ func (s *Schema) kwPatternProps(b []byte, st int) (Opcode, int, error) {
 
 	i, err := s.enterKind(b, st, json2.Object, PatternProps)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var pat, sub Opcode
+	var pat, sub Node
 
 	for d.ForMore(b, &i, json2.Object, &err) {
 		pat, i, err = s.kwPattern(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		sub, i, err = s.compile(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		s.prog.tmp = append(s.prog.tmp, pat, sub)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n := (len(s.prog.tmp) - mark) / 2
@@ -447,7 +461,7 @@ func (s *Schema) kwPatternProps(b []byte, st int) (Opcode, int, error) {
 	return makeNode(PatternProps, off, n), i, nil
 }
 
-func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwList(op Opcode, b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -455,27 +469,25 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	i, err := s.enterKind(b, st, json2.Array, op)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var val Opcode
+	var val Node
 
 	for d.ForMore(b, &i, json2.Array, &err) {
-		est := i
-
 		val, i, err = s.literal(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		if op == Required && val.Op() != String {
-			return 0, i, serr(RequiredNotString, Required, est, i-est)
+			return Node{}, i, kerr(RequiredNotString, Required)
 		}
 
 		s.prog.tmp = append(s.prog.tmp, val)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n := len(s.prog.tmp) - mark
@@ -485,7 +497,7 @@ func (s *Schema) kwList(op Opcode, b []byte, st int) (Opcode, int, error) {
 	return makeNode(op, off, n), i, nil
 }
 
-func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -493,21 +505,21 @@ func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
 
 	i, err := s.enterKind(b, st, json2.Array, op)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
-	var sub Opcode
+	var sub Node
 
 	for d.ForMore(b, &i, json2.Array, &err) {
 		sub, i, err = s.compile(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		s.prog.tmp = append(s.prog.tmp, sub)
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n := len(s.prog.tmp) - mark
@@ -517,10 +529,10 @@ func (s *Schema) kwSchemas(op Opcode, b []byte, st int) (Opcode, int, error) {
 	return makeNode(op, off, n), i, nil
 }
 
-func (s *Schema) kwSub(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwSub(op Opcode, b []byte, st int) (Node, int, error) {
 	sub, i, err := s.compile(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	off := len(s.prog.code)
@@ -529,10 +541,10 @@ func (s *Schema) kwSub(op Opcode, b []byte, st int) (Opcode, int, error) {
 	return makeNode(op, off, 1), i, nil
 }
 
-func (s *Schema) kwValue(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwValue(op Opcode, b []byte, st int) (Node, int, error) {
 	val, i, err := s.literal(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	off := len(s.prog.code)
@@ -544,14 +556,14 @@ func (s *Schema) kwValue(op Opcode, b []byte, st int) (Opcode, int, error) {
 // kwNum is kwValue for numeric keywords: the value must be a JSON number, so a
 // typo like {"minimum":"x"} is a curated ErrKeyword instead of a silently-zero
 // bound. The decoder already classifies the literal, so val.Op() is the check.
-func (s *Schema) kwNum(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwNum(op Opcode, b []byte, st int) (Node, int, error) {
 	val, i, err := s.literal(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	if val.Op() != Number {
-		return 0, i, serr(MustBeNumber, op, st, i-st)
+		return Node{}, i, kerr(MustBeNumber, op)
 	}
 
 	off := len(s.prog.code)
@@ -560,17 +572,17 @@ func (s *Schema) kwNum(op Opcode, b []byte, st int) (Opcode, int, error) {
 	return makeNode(op, off, 1), i, nil
 }
 
-func (s *Schema) kwImm(op Opcode, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwImm(op Opcode, b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	raw, i, err := d.Raw(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n, ok := integerValue(raw)
 	if !ok {
-		return 0, i, serr(MustBeInteger, op, st, i-st)
+		return Node{}, i, kerr(MustBeInteger, op)
 	}
 
 	return makeImm(op, n), i, nil
@@ -591,17 +603,17 @@ func integerValue(raw []byte) (int, bool) {
 	return int(f), true
 }
 
-func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwUnique(b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	raw, i, err := d.Raw(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	v, err := json2.Value(raw).Bool()
 	if err != nil {
-		return 0, i, serr(MustBeBool, Unique, st, i-st)
+		return Node{}, i, kerr(MustBeBool, Unique)
 	}
 
 	if !v {
@@ -614,46 +626,54 @@ func (s *Schema) kwUnique(b []byte, st int) (Opcode, int, error) {
 // kwFormat compiles a format we assert into one word. Any other name stays an
 // annotation, kept verbatim: the spec has a validator ignore what it does not
 // know rather than fail, and the document still round-trips.
-func (s *Schema) kwFormat(name, b []byte, kst, st int) (Opcode, int, error) {
+func (s *Schema) kwFormat(name, b []byte, kst, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Format, st, i-st)
+		return Node{}, i, kerr(MustBeString, Format)
 	}
 
 	fname, i, err := d.Key(b, i)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	f := formatOf(fname)
 	if f == 0 {
-		return s.kwUnknown(name, b, kst, st)
+		// A format we do not implement: the spec's default is to carry it as an
+		// annotation, so keep the pair. It is the keyword's value we lack, not
+		// the keyword — only RejectUnsupported, which asks about anything
+		// unimplemented, turns it into an error.
+		if s.Flags.Is(SchemaRejectUnsupported) {
+			return Node{}, i, kerr(UnsupportedFormat, Format)
+		}
+
+		return s.kwPair(Raw, b, kst, st)
 	}
 
 	return makeImm(Format, int(f)), i, nil
 }
 
-func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwPattern(b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Pattern, st, i-st)
+		return Node{}, i, kerr(MustBeString, Pattern)
 	}
 
 	j, err := d.Skip(b, i)
 	if err != nil {
-		return 0, j, err
+		return Node{}, j, err
 	}
 
 	op, err := s.prog.str(b, i, j, Pattern, false)
@@ -661,35 +681,51 @@ func (s *Schema) kwPattern(b []byte, st int) (Opcode, int, error) {
 	return op, j, err
 }
 
-func (s *Schema) kwRef(b []byte, st int) (Opcode, int, error) {
+// kwID is the subschema's own name: an opaque URI, the handle a $ref to this
+// subschema uses. It is a keyword, not an annotation, because resolution needs
+// to find it — ordered first in the block so it sits at index 0.
+func (s *Schema) kwID(b []byte, st int) (Node, int, error) {
+	return s.kwString(ID, b, st)
+}
+
+func (s *Schema) kwRef(b []byte, st int) (Node, int, error) {
+	return s.kwString(Ref, b, st)
+}
+
+// kwString compiles a keyword whose value is a non-empty string kept verbatim:
+// any URI-reference for $ref ("#..." internal, "doc#frag" external), the URI
+// itself for $id.
+func (s *Schema) kwString(op Opcode, b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	if tp != json2.String {
-		return 0, i, serr(MustBeString, Ref, st, i-st)
+		return Node{}, i, kerr(MustBeString, op)
 	}
 
 	j, err := d.Skip(b, i)
 	if err != nil {
-		return 0, j, err
+		return Node{}, j, err
 	}
 
-	// any URI-reference: "#..." internal, "doc#frag" external (resolved via docs).
 	if j-i-2 < 1 { // nothing between the quotes
-		return 0, i, serr(EmptyRef, Ref, st, j-st)
+		return Node{}, i, kerr(EmptyRef, op)
 	}
 
-	op, err := s.prog.str(b, i, j, Ref, false)
+	node, err := s.prog.str(b, i, j, op, false)
+	if err != nil {
+		return Node{}, j, err
+	}
 
-	return op, j, err
+	return node, j, nil
 }
 
 // refString is the pointer a Ref denotes.
-func (s *Schema) refString(op Opcode) string {
+func (s *Schema) refString(op Node) string {
 	return string(s.prog.Reader().String(op))
 }
 
@@ -710,7 +746,7 @@ func pointerEscape(s string) string {
 // kwDefs compiles $defs/definitions into a Defs pair-block (raw key + subschema)
 // that Format round-trips, and registers each entry in the resolution table
 // s.defs under its canonical pointer name for $ref lookup.
-func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
+func (s *Schema) kwDefs(name, b []byte, st int) (Node, int, error) {
 	mark := len(s.prog.tmp)
 	defer func() { s.prog.tmp = s.prog.tmp[:mark] }()
 
@@ -718,29 +754,29 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 
 	i, err := s.enterKind(b, st, json2.Object, Defs)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	prefix := "#/" + string(name) + "/"
 
-	var key, sub Opcode
+	var key, sub Node
 
 	for d.ForMore(b, &i, json2.Object, &err) {
 		key, i, err = s.literal(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		sub, i, err = s.compile(b, i)
 		if err != nil {
-			return 0, i, err
+			return Node{}, i, err
 		}
 
 		s.prog.tmp = append(s.prog.tmp, key, sub)
 		s.defs = append(s.defs, def{prefix + pointerEscape(string(s.prog.Reader().String(key))), sub})
 	}
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	n := (len(s.prog.tmp) - mark) / 2
@@ -755,36 +791,42 @@ func (s *Schema) kwDefs(name, b []byte, st int) (Opcode, int, error) {
 // Raw annotation. A recognized-but-unimplemented keyword is rejected under
 // SchemaRejectUnsupported (ErrUnsupported); a genuine unknown under
 // SchemaRejectUnknown (ErrUnknownKeyword).
-func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Opcode, int, error) {
+func (s *Schema) kwUnknown(name, b []byte, kst, st int) (Node, int, error) {
 	op := Raw
 	switch {
 	case isExtKeyword(name):
 		op = Ext
 	case unsupportedKeyword(name):
 		if s.Flags.Is(SchemaRejectUnsupported) {
-			return 0, st, serr(UnsupportedKeyword, None, kst, st-kst)
+			return Node{}, st, kerr(UnsupportedKeyword, None)
 		}
 	case annotationKeyword(name):
 		// inert even under strict: a legit no-op in our vocabulary
 	case s.Flags.Is(SchemaRejectUnknown):
-		return 0, st, serr(UnknownKeyword, None, kst, st-kst)
+		return Node{}, st, kerr(UnknownKeyword, None)
 	}
 
+	return s.kwPair(op, b, kst, st)
+}
+
+// kwPair keeps a keyword we do not model as a key/value pair node, so it
+// round-trips and a Walk handler can act on it.
+func (s *Schema) kwPair(op Opcode, b []byte, kst, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	kend, err := d.Skip(b, kst)
 	if err != nil {
-		return 0, kend, err
+		return Node{}, kend, err
 	}
 
 	key, err := s.prog.str(b, kst, kend, String, false)
 	if err != nil {
-		return 0, kend, err
+		return Node{}, kend, err
 	}
 
 	val, i, err := s.literal(b, st)
 	if err != nil {
-		return 0, i, err
+		return Node{}, i, err
 	}
 
 	off := len(s.prog.code)
@@ -810,23 +852,31 @@ func (s *Schema) checkRefs() error {
 		doc, frag := splitRef(s.refString(op))
 
 		if doc == "" {
-			if s.fragTarget(frag) == None {
-				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
+			if s.fragTarget(frag).op == None {
+				return serr(UnresolvedRef, op)
+			}
+
+			continue
+		}
+
+		if n := s.fragTarget(doc); n.op != None {
+			if s.fragFrom(n, frag).op == None {
+				return serr(UnresolvedRef, op)
 			}
 
 			continue
 		}
 
 		if t := s.docs[doc]; t != nil {
-			if t.fragTarget(frag) == None {
-				return serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
+			if t.fragTarget(frag).op == None {
+				return serr(UnresolvedRef, op)
 			}
 
 			continue
 		}
 
 		if s.Resolve == nil {
-			return serr(NoResolver, op, op.OffInt(), op.ArgInt())
+			return serr(NoResolver, op)
 		}
 	}
 
@@ -843,11 +893,11 @@ func (s *Schema) checkPatterns() error {
 
 		re, err := regexp.Compile(string(s.prog.Reader().Span(op)))
 		if err != nil {
-			return serr(BadPattern, op, op.OffInt(), op.ArgInt())
+			return serr(BadPattern, op)
 		}
 
 		if s.patterns == nil {
-			s.patterns = map[Opcode]*regexp.Regexp{}
+			s.patterns = map[Node]*regexp.Regexp{}
 		}
 
 		s.patterns[op] = re
@@ -859,13 +909,13 @@ func (s *Schema) checkPatterns() error {
 // Lookup resolves a $ref string the way a $ref keyword would: "#frag" in this
 // document, "doc#frag" in a registered or Resolve-loaded one. The returned
 // document owns the node, so walk or read it through that document.
-func (s *Schema) Lookup(ref string) (*Schema, Opcode, error) {
-	return s.lookup(ref, None)
+func (s *Schema) Lookup(ref string) (*Schema, Node, error) {
+	return s.lookup(ref, Node{})
 }
 
 // RefTarget is Lookup of the pointer a $ref node holds, errors anchored at the
 // node.
-func (s *Schema) RefTarget(op Opcode) (*Schema, Opcode, error) {
+func (s *Schema) RefTarget(op Node) (*Schema, Node, error) {
 	if op.Op() != Ref {
 		panic(op.Op())
 	}
@@ -873,23 +923,34 @@ func (s *Schema) RefTarget(op Opcode) (*Schema, Opcode, error) {
 	return s.lookup(s.refString(op), op)
 }
 
-func (s *Schema) lookup(ref string, op Opcode) (*Schema, Opcode, error) {
+func (s *Schema) lookup(ref string, op Node) (*Schema, Node, error) {
 	doc, frag := splitRef(ref)
 
 	t := s
 
 	if doc != "" {
+		// A schema in this document may have named itself doc with $id; then the
+		// fragment is a pointer into that schema, not into the root.
+		if n := s.fragTarget(doc); n.op != None {
+			n = s.fragFrom(n, frag)
+			if n.op == None {
+				return s, Node{}, serr(UnresolvedRef, op)
+			}
+
+			return s, n, nil
+		}
+
 		var err error
 
 		t, err = s.loadDoc(doc)
 		if err != nil {
-			return s, None, err
+			return s, Node{}, err
 		}
 	}
 
 	tnode := t.fragTarget(frag)
-	if tnode == None {
-		return s, None, serr(UnresolvedRef, op, op.OffInt(), op.ArgInt())
+	if tnode.op == None {
+		return s, Node{}, serr(UnresolvedRef, op)
 	}
 
 	return t, tnode, nil
@@ -904,7 +965,7 @@ func (s *Schema) loadDoc(handle string) (*Schema, error) {
 	}
 
 	if s.Resolve == nil {
-		return nil, serr(NoResolver, None, 0, 0)
+		return nil, serr(NoResolver, Node{})
 	}
 
 	body, err := s.Resolve(s.ID, handle)
@@ -925,6 +986,33 @@ func (s *Schema) loadDoc(handle string) (*Schema, error) {
 	return t, nil
 }
 
+// pairEnd is where the keyword's value ends. A keyword that rejects its value
+// on sight stops at the value's first byte, so skip it to name the whole pair;
+// a value the decoder cannot skip either is reported as far as it got.
+func (s *Schema) pairEnd(b []byte, vst, i int) int {
+	var d json2.Iterator
+
+	if end, err := d.Skip(b, vst); err == nil && end > i {
+		return end
+	}
+
+	return i
+}
+
+// locate points a compile error at the whole "key": value pair it came from,
+// the way a compiled keyword node remembers itself. The innermost level that
+// knows a pair wins: once a finding has a place, the levels above leave it.
+func locate(err error, off, end int) error {
+	d, ok := err.(Diagnostics)
+	if !ok || len(d) != 1 || d[0].Op.meta != 0 {
+		return err
+	}
+
+	d[0].Op = d[0].Op.withSrc(off, end)
+
+	return d
+}
+
 // splitRef cuts a ref at '#' into (document, fragment); fragment keeps the '#'.
 func splitRef(ref string) (doc, frag string) {
 	if i := strings.IndexByte(ref, '#'); i >= 0 {
@@ -934,12 +1022,18 @@ func splitRef(ref string) (doc, frag string) {
 	return ref, ""
 }
 
-// fragTarget resolves a fragment within this document: "" or "#" is the root,
-// "#anchor" and "#/$defs/x" are entries in the defs table, any other "#/..." is
-// walked as a JSON Pointer over the program.
-func (s *Schema) fragTarget(frag string) Opcode {
+// fragTarget resolves a fragment against this document's root.
+func (s *Schema) fragTarget(frag string) Node {
+	return s.fragFrom(s.root, frag)
+}
+
+// fragFrom resolves a fragment against the schema start names: "" or "#" is
+// start itself, "#anchor" and "#/$defs/x" are entries in the defs table (which
+// are document-wide, so they ignore start), any other "#/..." is a pointer
+// walked from start.
+func (s *Schema) fragFrom(start Node, frag string) Node {
 	if frag == "" || frag == "#" {
-		return s.root
+		return start
 	}
 
 	for i := range s.defs {
@@ -949,19 +1043,19 @@ func (s *Schema) fragTarget(frag string) Opcode {
 	}
 
 	if !strings.HasPrefix(frag, "#/") {
-		return None
+		return Node{}
 	}
 
-	return s.pointerTarget(frag[1:])
+	return s.pointerFrom(start, frag[1:])
 }
 
 // pointerTarget walks a JSON Pointer over the program: a keyword name in a
 // schema object, a member name in a properties-like block, an index in a schema
 // list. A single-subschema keyword (items, not, if, ...) is stepped through so
 // the pointer reads as it does over the JSON. Only a schema position resolves.
-func (s *Schema) pointerTarget(p string) Opcode {
+func (s *Schema) pointerFrom(start Node, p string) Node {
 	r := s.prog.Reader()
-	op := s.root
+	op := start
 
 	for p != "" {
 		var tok string
@@ -975,21 +1069,21 @@ func (s *Schema) pointerTarget(p string) Opcode {
 		case AllOf, AnyOf, OneOf, Prefix:
 			i, ok := pointerIndex(tok)
 			if !ok || i >= op.ArgInt() {
-				return None
+				return Node{}
 			}
 
 			op = r.Nodes(op)[i]
 		default:
-			return None
+			return Node{}
 		}
 
 		switch op.Op() {
 		case Items:
-			_, op = s.itemsParts(op)
+			_, op = s.prog.Reader().ItemsParts(op)
 		case Additional:
-			_, _, op = s.additionalParts(op)
+			_, _, op = s.prog.Reader().PropertiesParts(op)
 		case If:
-			op, _, _ = s.condParts(op)
+			op, _, _ = s.prog.Reader().CondParts(op)
 		case Not, Then, Else:
 			op = r.Deref(op)
 		}
@@ -999,20 +1093,20 @@ func (s *Schema) pointerTarget(p string) Opcode {
 	case All, Pass, Fail:
 		return op
 	default:
-		return None
+		return Node{}
 	}
 }
 
 // keywordNamed is the keyword of schema node op spelled name, or None. Raw and
 // Ext hold literals, never a schema, so they are not looked up.
-func (s *Schema) keywordNamed(op Opcode, name string) Opcode {
+func (s *Schema) keywordNamed(op Node, name string) Node {
 	for _, c := range s.prog.Reader().Nodes(op) {
 		if c.Op() != Raw && c.Op() != Ext && c.Keyword() == name {
 			return c
 		}
 	}
 
-	return None
+	return Node{}
 }
 
 // pointerToken splits the leading reference token off p ("/a/b" -> "a", "/b"),
@@ -1055,7 +1149,7 @@ func pointerIndex(tok string) (int, bool) {
 	return n, true
 }
 
-func (s *Schema) literal(b []byte, st int) (Opcode, int, error) {
+func (s *Schema) literal(b []byte, st int) (Node, int, error) {
 	return s.prog.value(b, st, false)
 }
 
@@ -1101,7 +1195,7 @@ func unsupportedKeyword(name []byte) bool {
 // inert even under strict flags.
 func annotationKeyword(name []byte) bool {
 	switch string(name) {
-	case "$schema", "$id", "$anchor", "$comment", "$vocabulary",
+	case "$schema", "$anchor", "$comment", "$vocabulary",
 		"title", "description", "examples", "readOnly", "writeOnly", "deprecated",
 		"contentEncoding", "contentMediaType", "contentSchema":
 		return true
@@ -1111,6 +1205,7 @@ func annotationKeyword(name []byte) bool {
 }
 
 var keywordOrder = []Opcode{
+	ID,
 	Ref,
 	Type, Ext,
 	Enum, Const,
@@ -1159,8 +1254,8 @@ func (s *Schema) mergeDefs(mark int) {
 // properties and patternProperties nodes, so apply can tell which keys are
 // already covered. Without either sibling the node keeps its lone subschema
 // (every property is additional).
-func (s *Schema) linkAdditional(all []Opcode) {
-	var props, patterns Opcode
+func (s *Schema) linkAdditional(all []Node) {
+	var props, patterns Node
 	ai := -1
 
 	for i, op := range all {
@@ -1184,21 +1279,23 @@ func (s *Schema) linkAdditional(all []Opcode) {
 	all[ai] = makeNode(Additional, off, 3)
 }
 
-// additionalParts splits an Additional node into its sibling properties and
-// patternProperties nodes (Pass when absent) and its subschema.
-func (s *Schema) additionalParts(op Opcode) (props, patterns, sub Opcode) {
+// PropertiesParts splits the properties family, which the compiler folded into
+// the additionalProperties node: the properties and patternProperties nodes
+// (Pass when absent) and the subschema for every member neither of them covers,
+// which is Fail for additionalProperties:false and Pass for true.
+func (b BufferReader) PropertiesParts(op Node) (props, patterns, sub Node) {
 	if op.Arg() == 3 {
-		o := op.Off()
-		return s.prog.code[o], s.prog.code[o+1], s.prog.code[o+2]
+		o := op.OffInt()
+		return b.code[o], b.code[o+1], b.code[o+2]
 	}
 
-	return Pass, Pass, s.prog.code[op.Off()]
+	return Node{op: Pass}, Node{op: Pass}, b.code[op.OffInt()]
 }
 
 // linkItems gives an items node a reference to its sibling prefixItems, so apply
 // knows how many leading items are already covered.
-func (s *Schema) linkItems(all []Opcode) {
-	var prefix Opcode
+func (s *Schema) linkItems(all []Node) {
+	var prefix Node
 	ii := -1
 
 	for i, op := range all {
@@ -1220,16 +1317,21 @@ func (s *Schema) linkItems(all []Opcode) {
 	all[ii] = makeNode(Items, off, 2)
 }
 
-func (s *Schema) itemsParts(op Opcode) (prefix, sub Opcode) {
+// ItemsParts splits an items node into its sibling prefixItems (Pass when
+// absent), which covers the leading elements, and the subschema for the rest.
+//
+// Pass says a part places no constraint, whether it was absent or written true;
+// ask Keyword for the keyword itself to tell those apart.
+func (b BufferReader) ItemsParts(op Node) (prefix, sub Node) {
 	if op.Arg() == 2 {
-		o := op.Off()
-		return s.prog.code[o+1], s.prog.code[o]
+		o := op.OffInt()
+		return b.code[o+1], b.code[o]
 	}
 
-	return Pass, s.prog.code[op.Off()]
+	return Node{op: Pass}, b.code[op.OffInt()]
 }
 
-func (s *Schema) linkCond(all []Opcode) {
+func (s *Schema) linkCond(all []Node) {
 	ii, ti, ei := -1, -1, -1
 
 	for i, op := range all {
@@ -1247,7 +1349,7 @@ func (s *Schema) linkCond(all []Opcode) {
 		return
 	}
 
-	then, els := Pass, Pass
+	then, els := Node{op: Pass}, Node{op: Pass}
 
 	if ti >= 0 {
 		then = s.prog.code[all[ti].Off()]
@@ -1262,17 +1364,20 @@ func (s *Schema) linkCond(all []Opcode) {
 	all[ii] = makeNode(If, off, 3)
 }
 
-func (s *Schema) condParts(op Opcode) (cond, then, els Opcode) {
+// CondParts splits an if node into its condition and the then and else arms
+// (Pass when absent), which the compiler folded into it.
+func (b BufferReader) CondParts(op Node) (cond, then, els Node) {
+	off := op.OffInt()
+
 	if op.Arg() == 3 {
-		o := op.Off()
-		return s.prog.code[o], s.prog.code[o+1], s.prog.code[o+2]
+		return b.code[off], b.code[off+1], b.code[off+2]
 	}
 
-	return s.prog.code[op.Off()], Pass, Pass
+	return b.code[off], Node{op: Pass}, Node{op: Pass}
 }
 
-func (s *Schema) canonRequired(all []Opcode) {
-	var props, req Opcode
+func (s *Schema) canonRequired(all []Node) {
+	var props, req Node
 
 	for _, op := range all {
 		switch op.Op() {
@@ -1296,7 +1401,7 @@ func (s *Schema) canonRequired(all []Opcode) {
 	}
 }
 
-func (s *Schema) propIndex(props, name Opcode) int {
+func (s *Schema) propIndex(props, name Node) int {
 	off, n := props.OffInt(), props.ArgInt()
 
 	for i := range n {
@@ -1308,7 +1413,7 @@ func (s *Schema) propIndex(props, name Opcode) int {
 	return n
 }
 
-func (s *Schema) sortKeywords(all []Opcode) {
+func (s *Schema) sortKeywords(all []Node) {
 	for i := 1; i < len(all); i++ {
 		for j := i; j > 0 && s.keywordLess(all[j], all[j-1]); j-- {
 			all[j], all[j-1] = all[j-1], all[j]
@@ -1318,7 +1423,7 @@ func (s *Schema) sortKeywords(all []Opcode) {
 
 // keywordLess orders keywords by keywordRank, breaking ties by name for the only
 // repeatable keywords, Ext and Raw (every other keyword is unique per schema).
-func (s *Schema) keywordLess(a, b Opcode) bool {
+func (s *Schema) keywordLess(a, b Node) bool {
 	ra, rb := s.keywordRank(a), s.keywordRank(b)
 	if ra != rb {
 		return ra < rb
@@ -1335,7 +1440,7 @@ func (s *Schema) keywordLess(a, b Opcode) bool {
 // ahead of the real keywords; any other Raw ranks last, in Raw's keywordOrder slot.
 var rawFront = []string{"title", "description"}
 
-func (s *Schema) keywordRank(op Opcode) int {
+func (s *Schema) keywordRank(op Node) int {
 	if op.Op() == Raw {
 		name := s.prog.Reader().String(s.prog.code[op.Off()])
 

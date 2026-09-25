@@ -140,14 +140,49 @@ func TestFormatUnasserted(tb *testing.T) {
 	} {
 		src := `{"format":"` + name + `"}`
 
-		for _, data := range []string{`"nope"`, `""`, `42`} {
-			if !validFlags(tb, src, data, AssertStringFormat) {
-				tb.Errorf("%s %s: asserted, want inert", name, data)
+		// the keyword is known, only its value is unimplemented, so rejecting
+		// unknown keywords does not reject it
+		for _, flags := range []Flags{0, AssertStringFormat, SchemaRejectUnknown, SchemaRejectUnknown | AssertStringFormat} {
+			for _, data := range []string{`"nope"`, `""`, `42`} {
+				if !validFlags(tb, src, data, flags) {
+					tb.Errorf("%s %s flags=%b: asserted, want inert", name, data, flags)
+				}
+			}
+
+			if got := string(compileFlags(tb, src, flags).Format(nil)); got != src {
+				tb.Errorf("%s flags=%b: format %q, want %q", name, flags, got, src)
 			}
 		}
 
-		if got := string(compileFlags(tb, src, AssertStringFormat).Format(nil)); got != src {
-			tb.Errorf("%s: format %q, want %q", name, got, src)
+		// asking for unsupported keywords to be refused refuses it by name
+		var s Schema
+		s.Flags.Set(SchemaRejectUnsupported)
+
+		err := s.Compile([]byte(src))
+
+		d := AsDiag(err)
+		if len(d) != 1 || d[0].Code != UnsupportedFormat {
+			tb.Errorf("%s strict: err %v (%+v), want UnsupportedFormat", name, err, d)
+			continue
+		}
+
+		if !errors.Is(err, ErrUnsupported) {
+			tb.Errorf("%s strict: err %v, want Is(ErrUnsupported)", name, err)
+		}
+
+		off, end := d[0].opSpan()
+		if got := src[off:end]; got != `"format":"`+name+`"` {
+			tb.Errorf("%s strict: span %q, want the keyword pair", name, got)
+		}
+	}
+
+	// an implemented format is never refused, whatever the flags
+	for _, name := range []string{"date-time", "date", "time", "email", "ipv4", "ipv6", "uuid"} {
+		var s Schema
+		s.Flags.Set(SchemaRejectUnknown | SchemaRejectUnsupported | AssertStringFormat)
+
+		if err := s.Compile([]byte(`{"format":"` + name + `"}`)); err != nil {
+			tb.Errorf("%s strict: %v", name, err)
 		}
 	}
 }
@@ -205,8 +240,9 @@ func TestFormatDiag(tb *testing.T) {
 		tb.Errorf("diag=%+v, want FormatMismatch on Format", d[0])
 	}
 
-	if got := string(data[d[0].Off:d[0].End]); got != "nope" {
-		tb.Errorf("diag span %q, want %q", got, "nope")
+	off, end := d[0].valSpan()
+	if got := string(data[off:end]); got != `"nope"` {
+		tb.Errorf("diag span %q, want %q", got, `"nope"`)
 	}
 
 	if !strings.Contains(d[0].Code.String(), "format") {

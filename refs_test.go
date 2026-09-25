@@ -186,14 +186,14 @@ func TestMutualResolve(tb *testing.T) {
 	}
 }
 
-func refNode(tb *testing.T, s *Schema, prop string) Opcode {
+func refNode(tb *testing.T, s *Schema, prop string) Node {
 	tb.Helper()
 
 	b := s.Reader()
 	op := s.Root()
 
 	if prop != "" {
-		op = None
+		op = Node{}
 
 		for k, v := range b.Iter(b.Keyword(s.Root(), Properties)) {
 			if string(b.String(k)) == prop {
@@ -202,13 +202,13 @@ func refNode(tb *testing.T, s *Schema, prop string) Opcode {
 			}
 		}
 
-		if op == None {
+		if op.Op() == None {
 			tb.Fatalf("no property %q", prop)
 		}
 	}
 
 	ref := b.Keyword(op, Ref)
-	if ref == None {
+	if ref.Op() == None {
 		tb.Fatalf("no $ref in %q", prop)
 	}
 
@@ -318,7 +318,7 @@ func TestRefTargetUnresolved(tb *testing.T) {
 	if !errors.Is(err, ErrRef) {
 		tb.Errorf("reftarget: err %v, want Is(ErrRef)", err)
 	}
-	if node != None {
+	if node.Op() != None {
 		tb.Errorf("reftarget: node %v, want None", node)
 	}
 }
@@ -483,5 +483,237 @@ func TestNoIDInternalRefs(tb *testing.T) {
 
 	if d, _ := validate(s, []byte(`{"a":"x"}`)); len(d) == 0 {
 		tb.Errorf("validate bad: want invalid")
+	}
+}
+
+// TestSubschemaID pins that a subschema carrying $id is registered under that
+// URI, so a $ref to it resolves inside the same document with no resolver in
+// sight — the bare URI, and a pointer into it.
+func TestSubschemaID(tb *testing.T) {
+	s, err := Compile([]byte(`{"$defs":{"T":{"$id":"urn:acme:t","type":"integer"}},"properties":{"a":{"$ref":"urn:acme:t"}}}`))
+	if err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	for _, tc := range []struct {
+		data string
+		ok   bool
+	}{
+		{`{"a":5}`, true},
+		{`{"a":"x"}`, false},
+	} {
+		d, err := validate(s, []byte(tc.data))
+		if err != nil {
+			tb.Errorf("validate %s: %v", tc.data, err)
+			continue
+		}
+
+		if (len(d) == 0) != tc.ok {
+			tb.Errorf("validate %s: ok=%v diag=%v", tc.data, tc.ok, d)
+		}
+	}
+
+	t, node, err := s.Lookup("urn:acme:t")
+	if err != nil {
+		tb.Fatalf("lookup: %v", err)
+	}
+
+	if t != s {
+		tb.Errorf("lookup: got another document, want the same")
+	}
+
+	if got := string(t.FormatNode(nil, node)); got != `{"$id":"urn:acme:t","type":"integer"}` {
+		tb.Errorf("lookup: got %s", got)
+	}
+
+	// a property subschema names itself just as well
+	p, err := Compile([]byte(`{"properties":{"x":{"$id":"urn:acme:x","type":"string"},"y":{"$ref":"urn:acme:x"}}}`))
+	if err != nil {
+		tb.Fatalf("compile property $id: %v", err)
+	}
+
+	if d, err := validate(p, []byte(`{"x":"a","y":"b"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate ok: err=%v diag=%v", err, d)
+	}
+
+	if d, _ := validate(p, []byte(`{"y":5}`)); len(d) == 0 {
+		tb.Errorf("validate bad: want invalid")
+	}
+}
+
+// TestSubschemaIDPointer walks a JSON Pointer from a self-named schema, at any
+// nesting depth, and from the root's own $id.
+func TestSubschemaIDPointer(tb *testing.T) {
+	src := `{"$id":"urn:root","properties":{"a":{"$id":"urn:inner","properties":{"b":{"minLength":2}}}}}`
+
+	s, err := Compile([]byte(src))
+	if err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	inner := s.Reader().Find(s.Reader().Keyword(s.Root(), Properties), "a")
+
+	for _, tc := range []struct {
+		ref  string
+		want string
+	}{
+		{"urn:root", src},
+		{"urn:inner", `{"$id":"urn:inner","properties":{"b":{"minLength":2}}}`},
+		{"urn:inner#/properties/b", `{"minLength":2}`},
+		{"urn:root#/properties/a", `{"$id":"urn:inner","properties":{"b":{"minLength":2}}}`},
+		{"urn:root#/properties/a/properties/b", `{"minLength":2}`},
+		{"#/properties/a/properties/b", `{"minLength":2}`},
+	} {
+		t, node, err := s.Lookup(tc.ref)
+		if err != nil {
+			tb.Errorf("lookup %q: %v", tc.ref, err)
+			continue
+		}
+
+		if t != s {
+			tb.Errorf("lookup %q: got another document, want the same", tc.ref)
+			continue
+		}
+
+		if got := string(t.FormatNode(nil, node)); got != tc.want {
+			tb.Errorf("lookup %q: got %s, want %s", tc.ref, got, tc.want)
+		}
+	}
+
+	// the two URIs name different nodes
+	if _, root, _ := s.Lookup("urn:root"); root != s.Root() {
+		tb.Errorf("urn:root does not name the root")
+	}
+
+	if _, node, _ := s.Lookup("urn:inner"); node != inner {
+		tb.Errorf("urn:inner does not name the inner subschema")
+	}
+
+	for _, ref := range []string{"urn:inner#/properties/zz", "urn:root#/properties/zz", "urn:nope"} {
+		if _, _, err := s.Lookup(ref); !errors.Is(err, ErrRef) {
+			tb.Errorf("lookup %q: err %v, want Is(ErrRef)", ref, err)
+		}
+	}
+
+	// a $ref written in the schema resolves the same way, with no resolver
+	var w Schema
+
+	if err := w.Compile([]byte(`{"properties":{"x":{"$id":"urn:acme:x","properties":{"y":{"type":"string"}}},"z":{"$ref":"urn:acme:x#/properties/y"}}}`)); err != nil {
+		tb.Fatalf("compile pointer ref: %v", err)
+	}
+
+	if d, err := validate(&w, []byte(`{"z":"ok"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate ok: err=%v diag=%v", err, d)
+	}
+
+	if d, _ := validate(&w, []byte(`{"z":5}`)); len(d) == 0 {
+		tb.Errorf("validate bad: want invalid")
+	}
+}
+
+// TestIDKeyword pins $id as a keyword: reachable with Keyword, readable, inert
+// at apply, and round-tripping through Format.
+func TestIDKeyword(tb *testing.T) {
+	src := `{"$id":"urn:acme:doc","type":"object","properties":{"a":{"$id":"urn:acme:a","type":"string"}}}`
+
+	s, err := Compile([]byte(src))
+	if err != nil {
+		tb.Fatalf("compile: %v", err)
+	}
+
+	r := s.Reader()
+
+	id := r.Keyword(s.Root(), ID)
+	if id.Op() != ID {
+		tb.Fatalf("Keyword(root, ID): got %v", id.Op())
+	}
+
+	if got := string(r.String(id)); got != "urn:acme:doc" {
+		tb.Errorf("$id value: got %q", got)
+	}
+
+	if got := id.Keyword(); got != "$id" {
+		tb.Errorf("$id Keyword(): got %q", got)
+	}
+
+	if got := string(s.FormatKeyword(nil, id)); got != `"urn:acme:doc"` {
+		tb.Errorf("FormatKeyword($id): got %s", got)
+	}
+
+	off, end, ok := id.Src()
+	if !ok || src[off:end] != `"$id":"urn:acme:doc"` {
+		tb.Errorf("$id src: %d:%d ok=%v %q", off, end, ok, src[off:end])
+	}
+
+	// $id sorts first, and both levels round-trip
+	if got := string(s.Format(nil)); got != src {
+		tb.Errorf("format: got %s, want %s", got, src)
+	}
+
+	if got := string(s.Format(nil)); got[:len(`{"$id":`)] != `{"$id":` {
+		tb.Errorf("format does not open with $id: %s", got)
+	}
+
+	// inert at apply: nothing about the document is judged by its name
+	if d, err := validate(s, []byte(`{"a":"x"}`)); err != nil || len(d) != 0 {
+		tb.Errorf("validate: err=%v diag=%v", err, d)
+	}
+
+	// authored out of order, it still comes back first
+	o, err := Compile([]byte(`{"type":"string","$id":"urn:acme:o"}`))
+	if err != nil {
+		tb.Fatalf("compile reordered: %v", err)
+	}
+
+	if got := string(o.Format(nil)); got != `{"$id":"urn:acme:o","type":"string"}` {
+		tb.Errorf("format reordered: got %s", got)
+	}
+
+	// and it is no longer an unknown keyword under strict flags
+	strict := Schema{Flags: SchemaRejectUnknown | SchemaRejectUnsupported}
+	if err := strict.Compile([]byte(`{"$id":"urn:acme:s"}`)); err != nil {
+		tb.Errorf("compile strict: %v", err)
+	}
+
+	if err := strict.Compile([]byte(`{"$id":5}`)); !errors.Is(err, ErrKeyword) {
+		tb.Errorf("compile $id:5: err %v, want Is(ErrKeyword)", err)
+	}
+}
+
+func TestDuplicateID(tb *testing.T) {
+	for _, in := range []string{
+		`{"$defs":{"A":{"$id":"urn:a"},"B":{"$id":"urn:a"}}}`,
+		`{"properties":{"a":{"$id":"urn:a"},"b":{"$id":"urn:a"}}}`,
+		`{"$defs":{"A":{"$id":"urn:a","properties":{"inner":{"$id":"urn:a"}}}}}`,
+		// the root is registered like any other self-named schema, so a
+		// subschema may not take its name either
+		`{"$id":"urn:a","properties":{"x":{"$id":"urn:a"}}}`,
+	} {
+		var s Schema
+
+		err := s.Compile([]byte(in))
+
+		d := AsDiag(err)
+		if len(d) != 1 || d[0].Code != DuplicateID {
+			tb.Errorf("compile %s: %v (%+v), want DuplicateID", in, err, d)
+			continue
+		}
+
+		if !errors.Is(err, ErrRef) {
+			tb.Errorf("compile %s: err %v, want Is(ErrRef)", in, err)
+		}
+
+		off, end := d[0].opSpan()
+		if got := in[off:end]; got != `"$id":"urn:a"` {
+			tb.Errorf("compile %s: span %d:%d %q, want the $id pair", in, off, end, got)
+		}
+	}
+
+	// two anchors still report DuplicateAnchor, a separate code
+	var a Schema
+
+	d := AsDiag(a.Compile([]byte(`{"$anchor":"A","$defs":{"T":{"$anchor":"A"}}}`)))
+	if len(d) != 1 || d[0].Code != DuplicateAnchor {
+		tb.Errorf("duplicate anchor: %+v, want DuplicateAnchor", d)
 	}
 }

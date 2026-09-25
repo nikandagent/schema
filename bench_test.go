@@ -66,7 +66,7 @@ func BenchmarkRewrite(b *testing.B) {
 
 	for range b.N {
 		var err error
-		w, _, err = a.Rewrite(&s, None, benchDoc, w[:0], nil)
+		w, _, err = a.Rewrite(&s, Node{}, benchDoc, w[:0], nil)
 		if err != nil {
 			b.Fatal(err)
 		}

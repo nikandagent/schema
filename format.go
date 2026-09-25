@@ -8,6 +8,8 @@ import (
 )
 
 // Format reconstructs the schema document from the program in canonical form.
+// It reads the compiled program, so it panics on a Schema whose Compile failed
+// or never ran — there is nothing to render.
 // $defs round-trips from its Defs node in the tree; the s.defs table is only a
 // $ref resolution index and is never emitted from here.
 func (s *Schema) Format(w []byte) []byte {
@@ -16,16 +18,16 @@ func (s *Schema) Format(w []byte) []byte {
 
 // FormatNode renders a single program node (e.g. a subschema reached via Root
 // and SchemaBuf) as schema JSON.
-func (s *Schema) FormatNode(w []byte, op Opcode) []byte {
+func (s *Schema) FormatNode(w []byte, op Node) []byte {
 	return s.format(w, op)
 }
 
 // FormatKeyword renders a keyword node's value as schema JSON: the operand a
 // Diag.Op stands for (3 for minLength, ["integer","null"] for type, the name
 // for a required entry, the subschema for additionalProperties).
-func (s *Schema) FormatKeyword(w []byte, op Opcode) []byte {
+func (s *Schema) FormatKeyword(w []byte, op Node) []byte {
 	switch op.Op() {
-	case String, Key:
+	case String:
 		return s.lit(w, op)
 	case Raw, Ext:
 		return s.lit(w, s.prog.code[op.Off()+1])
@@ -56,7 +58,7 @@ func appendRef(w, p []byte) []byte {
 	return append(w, '"')
 }
 
-func (s *Schema) dump(w []byte, op Opcode) []byte {
+func (s *Schema) dump(w []byte, op Node) []byte {
 	switch op.Op() {
 	case Pass, Fail, All:
 		return s.format(w, op)
@@ -65,7 +67,7 @@ func (s *Schema) dump(w []byte, op Opcode) []byte {
 	}
 }
 
-func (s *Schema) format(w []byte, op Opcode) []byte {
+func (s *Schema) format(w []byte, op Node) []byte {
 	switch op.Op() {
 	case Pass:
 		return append(w, "true"...)
@@ -102,7 +104,7 @@ func (s *Schema) format(w []byte, op Opcode) []byte {
 	}
 }
 
-func (s *Schema) constraint(w []byte, op Opcode) []byte {
+func (s *Schema) constraint(w []byte, op Node) []byte {
 	switch op.Op() {
 	case Type:
 		return s.formatType(w, TypesOf(op))
@@ -153,7 +155,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 		return s.lit(w, s.prog.code[op.Off()])
 	case Additional:
-		_, _, sub := s.additionalParts(op)
+		_, _, sub := s.prog.Reader().PropertiesParts(op)
 		return s.format(w, sub)
 	case PatternProps:
 		off, n := op.Off(), op.Arg()
@@ -176,7 +178,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 	case Items, Not, Then, Else:
 		return s.format(w, s.prog.code[op.Off()])
 	case If:
-		cond, _, _ := s.condParts(op)
+		cond, _, _ := s.prog.Reader().CondParts(op)
 		return s.format(w, cond)
 	case MinLen, MaxLen, MinItems, MaxItems, MinProps, MaxProps:
 		return strconv.AppendInt(w, op.Imm(), 10)
@@ -192,6 +194,10 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 		var e json2.Emitter
 
 		return e.AppendString(w, s.prog.Reader().Span(op))
+	case ID:
+		var e json2.Emitter
+
+		return e.AppendString(w, s.prog.Reader().Span(op))
 	case Ref:
 		return appendRef(w, s.prog.Reader().Span(op))
 	default:
@@ -200,7 +206,7 @@ func (s *Schema) constraint(w []byte, op Opcode) []byte {
 }
 
 // lit renders a value literal, reusing the data encoder over the program arena.
-func (s *Schema) lit(w []byte, val Opcode) []byte {
+func (s *Schema) lit(w []byte, val Node) []byte {
 	return s.prog.Reader().AppendJSON(w, val)
 }
 
@@ -235,8 +241,10 @@ func (s *Schema) formatType(w []byte, mask Types) []byte {
 	return w
 }
 
-// Keyword is the schema keyword a node stands for, "" for a node that is not a
+// Keyword is the schema keyword an opcode stands for, "" for one that is not a
 // keyword (a value, a required entry, a bare schema).
+func (n Node) Keyword() string { return n.op.Op().Keyword() }
+
 func (op Opcode) Keyword() string {
 	switch op.Op() {
 	case Type:
@@ -303,6 +311,8 @@ func (op Opcode) Keyword() string {
 		return "pattern"
 	case Format:
 		return "format"
+	case ID:
+		return "$id"
 	case Ref:
 		return "$ref"
 	default:

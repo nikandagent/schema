@@ -35,6 +35,10 @@ func TestSizeClasses(tb *testing.T) {
 		fail = 64 // a big chunk — resize a buffer to fill the bucket or drop under it
 	)
 
+	// element sizes: what an inline buffer is tuned in units of
+	tb.Logf("elements: Node %d, def %d, Diag %d, Step %d",
+		unsafe.Sizeof(Node{}), unsafe.Sizeof(def{}), unsafe.Sizeof(Diag{}), unsafe.Sizeof(Step{}))
+
 	for _, s := range []struct {
 		name string
 		size uintptr

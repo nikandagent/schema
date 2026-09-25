@@ -58,7 +58,7 @@ func TestTypesOfPanic(tb *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		op   Opcode
+		op   Node
 	}{
 		{"decoded Object", root},
 		{"decoded String", r.Nodes(root)[0]},

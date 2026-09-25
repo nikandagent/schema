@@ -24,7 +24,7 @@ func TestUse(tb *testing.T) {
 		tb.Fatalf("valid after reuse: diag=%d err=%v, want 0/nil (reset leaked)", len(d), err)
 	}
 
-	out, _, err := a.Rewrite(s, None, []byte(`{ "a" : "x" }`), nil, nil)
+	out, _, err := a.Rewrite(s, Node{}, []byte(`{ "a" : "x" }`), nil, nil)
 	if err != nil || string(out) != `{"a":"x"}` {
 		tb.Fatalf("rewrite: out=%q err=%v", out, err)
 	}
