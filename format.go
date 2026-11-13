@@ -152,8 +152,10 @@ func (s *Schema) constraint(w []byte, op Node) []byte {
 		}
 
 		return append(w, ']')
-	case Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+	case Const, Default:
 		return s.lit(w, s.prog.code[op.Off()])
+	case Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+		return append(w, s.prog.Reader().Span(op)...)
 	case Additional:
 		_, _, sub := s.prog.Reader().PropertiesParts(op)
 		return s.format(w, sub)
@@ -188,13 +190,7 @@ func (s *Schema) constraint(w []byte, op Node) []byte {
 		}
 
 		return append(w, "true"...)
-	case Format:
-		return append(append(append(w, '"'), formatNames[op.Imm()]...), '"')
-	case Pattern:
-		var e json2.Emitter
-
-		return e.AppendString(w, s.prog.Reader().Span(op))
-	case ID:
+	case Pattern, ID, Format:
 		var e json2.Emitter
 
 		return e.AppendString(w, s.prog.Reader().Span(op))

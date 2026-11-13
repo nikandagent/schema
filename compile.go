@@ -304,7 +304,7 @@ func (s *Schema) keyword(name, b []byte, kst, st int) (Node, int, error) {
 	case "pattern":
 		return s.kwPattern(b, st)
 	case "format":
-		return s.kwFormat(name, b, kst, st)
+		return s.kwFormat(b, st)
 	case "$id":
 		return s.kwID(b, st)
 	case "$ref":
@@ -566,10 +566,7 @@ func (s *Schema) kwNum(op Opcode, b []byte, st int) (Node, int, error) {
 		return Node{}, i, kerr(MustBeNumber, op)
 	}
 
-	off := len(s.prog.code)
-	s.prog.code = append(s.prog.code, val)
-
-	return makeNode(op, off, 1), i, nil
+	return makeNode(op, val.OffInt(), val.ArgInt()), i, nil
 }
 
 func (s *Schema) kwImm(op Opcode, b []byte, st int) (Node, int, error) {
@@ -623,10 +620,12 @@ func (s *Schema) kwUnique(b []byte, st int) (Node, int, error) {
 	return makeImm(Unique, 1), i, nil
 }
 
-// kwFormat compiles a format we assert into one word. Any other name stays an
-// annotation, kept verbatim: the spec has a validator ignore what it does not
-// know rather than fail, and the document still round-trips.
-func (s *Schema) kwFormat(name, b []byte, kst, st int) (Node, int, error) {
+// kwFormat keeps the name verbatim, so every format round-trips, and
+// recognizes it once, in the flags byte. A name we do not recognize is still
+// carried: the spec has a validator ignore what it does not know rather than
+// fail. Only RejectUnsupported, which asks about anything unimplemented, turns
+// it into an error.
+func (s *Schema) kwFormat(b []byte, st int) (Node, int, error) {
 	var d json2.Iterator
 
 	tp, i, err := d.Type(b, st)
@@ -638,25 +637,24 @@ func (s *Schema) kwFormat(name, b []byte, kst, st int) (Node, int, error) {
 		return Node{}, i, kerr(MustBeString, Format)
 	}
 
-	fname, i, err := d.Key(b, i)
+	j, err := d.Skip(b, i)
+	if err != nil {
+		return Node{}, j, err
+	}
+
+	op, err := s.prog.str(b, i, j, Format, false)
 	if err != nil {
 		return Node{}, i, err
 	}
 
-	f := formatOf(fname)
-	if f == 0 {
-		// A format we do not implement: the spec's default is to carry it as an
-		// annotation, so keep the pair. It is the keyword's value we lack, not
-		// the keyword — only RejectUnsupported, which asks about anything
-		// unimplemented, turns it into an error.
-		if s.Flags.Is(SchemaRejectUnsupported) {
-			return Node{}, i, kerr(UnsupportedFormat, Format)
-		}
-
-		return s.kwPair(Raw, b, kst, st)
+	f := formatOf(s.prog.Reader().Span(op))
+	if f == FormatUnknown && s.Flags.Is(SchemaRejectUnsupported) {
+		return Node{}, i, kerr(UnsupportedFormat, Format)
 	}
 
-	return makeImm(Format, int(f)), i, nil
+	op.meta |= Opcode(f)
+
+	return op, j, nil
 }
 
 func (s *Schema) kwPattern(b []byte, st int) (Node, int, error) {
@@ -1004,7 +1002,11 @@ func (s *Schema) pairEnd(b []byte, vst, i int) int {
 // knows a pair wins: once a finding has a place, the levels above leave it.
 func locate(err error, off, end int) error {
 	d, ok := err.(Diagnostics)
-	if !ok || len(d) != 1 || d[0].Op.meta != 0 {
+	if !ok || len(d) != 1 {
+		return err
+	}
+
+	if _, _, has := d[0].Op.Src(); has {
 		return err
 	}
 
@@ -1240,7 +1242,7 @@ func (s *Schema) mergeDefs(mark int) {
 		off := len(s.prog.code)
 		s.prog.code = append(s.prog.code, s.prog.Reader().Nodes(a)...)
 		s.prog.code = append(s.prog.code, s.prog.Reader().Nodes(b)...)
-		tmp[first] = makeNode(Defs, off, int(a.Arg()+b.Arg()))
+		tmp[first] = Node{op: pack(Defs, off, int(a.Arg()+b.Arg())), meta: a.meta}
 
 		copy(tmp[i:], tmp[i+1:])
 		tmp = tmp[:len(tmp)-1]
@@ -1276,7 +1278,7 @@ func (s *Schema) linkAdditional(all []Node) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, props, patterns, s.prog.code[all[ai].Off()])
 
-	all[ai] = makeNode(Additional, off, 3)
+	all[ai] = Node{op: pack(Additional, off, 3), meta: all[ai].meta}
 }
 
 // PropertiesParts splits the properties family, which the compiler folded into
@@ -1314,7 +1316,7 @@ func (s *Schema) linkItems(all []Node) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, s.prog.code[all[ii].Off()], prefix)
 
-	all[ii] = makeNode(Items, off, 2)
+	all[ii] = Node{op: pack(Items, off, 2), meta: all[ii].meta}
 }
 
 // ItemsParts splits an items node into its sibling prefixItems (Pass when
@@ -1361,7 +1363,7 @@ func (s *Schema) linkCond(all []Node) {
 	off := len(s.prog.code)
 	s.prog.code = append(s.prog.code, s.prog.code[all[ii].Off()], then, els)
 
-	all[ii] = makeNode(If, off, 3)
+	all[ii] = Node{op: pack(If, off, 3), meta: all[ii].meta}
 }
 
 // CondParts splits an if node into its condition and the then and else arms

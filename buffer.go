@@ -427,7 +427,8 @@ func (b BufferReader) Span(op Node) []byte {
 
 func (b BufferReader) span(op Node) (off, end int) {
 	switch op.Op() {
-	case Number, String, Pattern, ID, Ref, Null, False, True:
+	case Number, String, Pattern, ID, Ref, Null, False, True,
+		Format, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
 		return op.SpanInt()
 	case None:
 		return 0, 0
@@ -570,7 +571,7 @@ func (b BufferReader) Iter(op Node) iter.Seq2[Node, Node] {
 			}
 
 			yield(Node{}, b.code[off])
-		case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+		case Not, Items, If, Then, Else, Const, Default:
 			yield(Node{}, b.code[off])
 		}
 	}
@@ -596,24 +597,24 @@ func (b BufferReader) Keyword(op Node, want Opcode) Node {
 }
 
 // Deref returns the single child of a pointer node — the subschema or operand it
-// points at (Not/Items/Const/Default/Minimum/…). These hold one reference, not a
+// points at (Not/Items/Const/Default/…). These hold one reference, not a
 // list, so it panics on any other op. Additional is variadic — split it with
 // PropertiesParts instead.
 func (b BufferReader) Deref(op Node) Node {
 	switch op.Op() {
-	case Not, Items, If, Then, Else, Const, Default, Minimum, Maximum, ExclMin, ExclMax, MultipleOf:
+	case Not, Items, If, Then, Else, Const, Default:
 		return b.code[op.OffInt()]
 	default:
 		panic(op.Op())
 	}
 }
 
-// String is the string a String, Pattern, ID or Ref node holds. Strings are
+// String is the string a String, Pattern, ID, Ref or Format node holds. Strings are
 // stored decoded, so this is the node's own bytes: no copy, no scratch, valid
 // for as long as the buffer is not rewritten.
 func (b BufferReader) String(op Node) []byte {
 	switch op.Op() {
-	case String, Pattern, ID, Ref:
+	case String, Pattern, ID, Ref, Format:
 		return b.Span(op)
 	default:
 		panic(op.Op())

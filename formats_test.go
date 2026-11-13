@@ -187,6 +187,54 @@ func TestFormatUnasserted(tb *testing.T) {
 	}
 }
 
+func TestFormatOf(tb *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want StringFormat
+	}{
+		{name: "date-time", want: FormatDateTime},
+		{name: "date", want: FormatDate},
+		{name: "time", want: FormatTime},
+		{name: "email", want: FormatEmail},
+		{name: "ipv4", want: FormatIPv4},
+		{name: "ipv6", want: FormatIPv6},
+		{name: "uuid", want: FormatUUID},
+		{name: "hostname", want: FormatUnknown},
+		{name: `\u0075uid`, want: FormatUUID},
+	} {
+		s := compileFlags(tb, `{"format":"`+tc.name+`"}`, 0)
+		b := s.Reader()
+
+		op := b.Keyword(s.Root(), Format)
+		if op.Op() != Format {
+			tb.Errorf("%s: keyword %v, want Format", tc.name, op.Op())
+			continue
+		}
+
+		if got := FormatOf(op); got != tc.want {
+			tb.Errorf("%s: FormatOf %v, want %v", tc.name, got, tc.want)
+		}
+
+		if _, _, ok := op.Src(); !ok {
+			tb.Errorf("%s: no source", tc.name)
+		}
+	}
+
+	if got := FormatOf(Node{}); got != FormatUnknown {
+		tb.Errorf("FormatOf(None) = %v, want FormatUnknown", got)
+	}
+
+	if got := FormatUUID.String(); got != "uuid" {
+		tb.Errorf("FormatUUID.String() = %q", got)
+	}
+
+	if got := FormatUnknown.String(); got != "unknown" {
+		tb.Errorf("FormatUnknown.String() = %q", got)
+	}
+
+	mustPanic(tb, "FormatOf(Type)", func() { FormatOf(makeImm(Type, int(TypeString))) })
+}
+
 func TestFormatRoundTrip(tb *testing.T) {
 	for _, name := range []string{"date-time", "date", "time", "email", "ipv4", "ipv6", "uuid"} {
 		src := `{"format":"` + name + `"}`

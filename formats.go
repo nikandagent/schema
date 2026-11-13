@@ -5,66 +5,80 @@ import (
 	"net/netip"
 )
 
-// strFormat is a "format" value we assert. A name outside this set never gets
-// here: it stays a Raw annotation, which is what the spec asks for.
-type strFormat int
-
 const (
-	formatDateTime strFormat = iota + 1
-	formatDate
-	formatTime
-	formatEmail
-	formatIPv4
-	formatIPv6
-	formatUUID
+	FormatUnknown StringFormat = iota
+	FormatDateTime
+	FormatDate
+	FormatTime
+	FormatEmail
+	FormatIPv4
+	FormatIPv6
+	FormatUUID
 )
 
 var formatNames = [...]string{
-	formatDateTime: "date-time",
-	formatDate:     "date",
-	formatTime:     "time",
-	formatEmail:    "email",
-	formatIPv4:     "ipv4",
-	formatIPv6:     "ipv6",
-	formatUUID:     "uuid",
+	FormatUnknown:  "unknown",
+	FormatDateTime: "date-time",
+	FormatDate:     "date",
+	FormatTime:     "time",
+	FormatEmail:    "email",
+	FormatIPv4:     "ipv4",
+	FormatIPv6:     "ipv6",
+	FormatUUID:     "uuid",
 }
 
-func formatOf(name []byte) strFormat {
+// FormatOf is the format a Format keyword names. A name the package does not
+// recognize is FormatUnknown, and so is None — the absent keyword Keyword
+// returns; tell the two apart by the node. Any other node panics.
+func FormatOf(op Node) StringFormat {
+	switch op.Op() {
+	case Format:
+		return StringFormat(op.meta & opMask)
+	case None:
+		return FormatUnknown
+	default:
+		panic(op.Op())
+	}
+}
+
+func (f StringFormat) String() string { return formatNames[f] }
+
+func formatOf(name []byte) StringFormat {
 	switch string(name) {
 	case "date-time":
-		return formatDateTime
+		return FormatDateTime
 	case "date":
-		return formatDate
+		return FormatDate
 	case "time":
-		return formatTime
+		return FormatTime
 	case "email":
-		return formatEmail
+		return FormatEmail
 	case "ipv4":
-		return formatIPv4
+		return FormatIPv4
 	case "ipv6":
-		return formatIPv6
+		return FormatIPv6
 	case "uuid":
-		return formatUUID
+		return FormatUUID
 	}
 
-	return 0
+	return FormatUnknown
 }
 
-func formatOK(s []byte, f strFormat, flags Flags) bool {
+func formatOK(s []byte, f StringFormat, flags Flags) bool {
 	switch f {
-	case formatDateTime:
+	case FormatDateTime:
 		return isDateTime(s)
-	case formatDate:
+	case FormatDate:
 		return isDate(s)
-	case formatTime:
+	case FormatTime:
 		return isTime(s)
-	case formatEmail:
+	case FormatEmail:
 		return isEmail(s, flags.Is(AssertEmailUseful))
-	case formatIPv4:
+	case FormatIPv4:
 		return isIPv4(s)
-	case formatIPv6:
+	case FormatIPv6:
 		return isIPv6(s)
-	case formatUUID:
+	case FormatUUID:
 		return isUUID(s)
 	}
 

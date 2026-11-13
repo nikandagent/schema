@@ -41,10 +41,11 @@ type (
 	//
 	//	IntLit         the int64 value, exact
 	//	FltLit         the float64 bits, exact
-	//	anything else  the node's span in the source text, zero when it has none
+	//	anything else  flags:8, then the node's span in the source text
+	//	               in the off and len fields, both zero when it has none
 	//
-	// The low 8 bits of meta — the opcode's own code and shape slot — are free
-	// for flags.
+	// The flags byte sits where the opcode keeps its code and shape. What it
+	// holds is fixed by the opcode too: Format keeps its StringFormat there.
 	Node struct {
 		op   Opcode
 		meta Opcode
@@ -59,6 +60,10 @@ type (
 	// single type a value has. The empty set is a schema node with no type
 	// keyword, so an absent keyword needs no special case.
 	Types uint8
+
+	// StringFormat is a "format" value the package recognizes. Every other name
+	// is still a Format node, with FormatUnknown here.
+	StringFormat uint8
 )
 
 const (
@@ -91,30 +96,38 @@ func (s *Schema) Reader() BufferReader { return s.prog.Reader() }
 //
 // payload by shape:
 //
-//	imm              value:56
+//	scalar               none
 //	span    off:32 |   len:24
+//	imm              value:56
+//	ref   index:32 | count:24  fixed count, known per opcode
 //	block index:32 | count:24
 //
-// span2 is the top half of the span code range (code >= 16): valueless scalars
-// (null/true/false) that still carry a source span. Ref is span-shaped too, in
-// the low span codes.
+// Ref ($ref) is span-shaped, not ref-shaped: it holds the reference text.
 const (
 	shapeShift = 5
-	opMask     = 1<<8 - 1
 
-	argShift = 8
-	offShift = 32
+	opSize  = 8
+	argSize = 24
+	offSize = 32
+	immSize = argSize + offSize
 
-	argMask = 1<<24 - 1 // full fields, for extraction
-	offMask = 1<<32 - 1
-	immMask = 1<<56 - 1
+	argShift = opSize
+	offShift = opSize + argSize
+	immShift = opSize
+
+	opMask  = 1<<opSize - 1
+	argMask = (1<<argSize - 1) << argShift
+	offMask = (1<<offSize - 1) << offShift
+	immMask = (1<<immSize - 1) << immShift
+
+	srcMask = argMask | offMask
 
 	// The top 4 values of each field are reserved as future sentinels (e.g. a
 	// field == its mask-k means the real value continues in the next opcode).
-	maxArg = argMask - 4
-	maxOff = offMask - 4
-	maxImm = immMask>>1 - 4
-	minImm = -(immMask>>1 + 1)
+	maxArg = 1<<argSize - 1 - 4
+	maxOff = 1<<offSize - 1 - 4
+	maxImm = 1<<(immSize-1) - 1 - 4
+	minImm = -1 << (immSize - 1)
 )
 
 const (
@@ -140,6 +153,13 @@ const (
 	Pattern
 
 	ID
+	Format
+
+	Minimum
+	Maximum
+	ExclMin
+	ExclMax
+	MultipleOf
 
 	Ref
 )
@@ -153,7 +173,6 @@ const (
 	MaxItems
 	MinProps
 	MaxProps
-	Format
 
 	IntLit
 	FltLit
@@ -182,11 +201,6 @@ const (
 	Prefix
 	Items
 	Additional
-	Minimum
-	Maximum
-	ExclMin
-	ExclMax
-	MultipleOf
 	Properties
 	PatternProps
 	Defs
@@ -278,7 +292,7 @@ func makeImm(op Opcode, v int) Node {
 		panic(v)
 	}
 
-	return Node{op: op | Opcode(v)<<argShift}
+	return Node{op: op | Opcode(v)<<immShift}
 }
 
 // MakeInt and MakeFlt carry the value in the meta word, so a literal is the
@@ -292,9 +306,9 @@ func MakeFlt(v float64) Node {
 }
 
 func (op Opcode) Op() Opcode { return op & opMask }
-func (op Opcode) Imm() int64 { return int64(op) >> argShift }
-func (op Opcode) Arg() int64 { return int64(op >> argShift & argMask) }
-func (op Opcode) Off() int64 { return int64(op >> offShift & offMask) }
+func (op Opcode) Imm() int64 { return int64(op) >> immShift }
+func (op Opcode) Arg() int64 { return int64(op & argMask >> argShift) }
+func (op Opcode) Off() int64 { return int64(op & offMask >> offShift) }
 
 // OffInt, ArgInt, and ImmInt narrow the accessors to int for indexing and
 // lengths; the payload fields are far below math.MaxInt on any real program.
@@ -333,7 +347,7 @@ func (n Node) Src() (off, end int, ok bool) {
 		return 0, 0, false
 	}
 
-	if n.meta == 0 {
+	if n.meta&srcMask == 0 {
 		return 0, 0, false
 	}
 
@@ -342,14 +356,14 @@ func (n Node) Src() (off, end int, ok bool) {
 	return off, end, true
 }
 
-// withSrc records where n was read from. A zero-length span is dropped: meta
-// zero is what "no source" means, and no real token is empty.
+// withSrc records where n was read from, keeping its flags. A zero-length span
+// is dropped: a zero span is what "no source" means, and no real token is empty.
 func (n Node) withSrc(off, end int) Node {
 	if end <= off {
 		return n
 	}
 
-	n.meta = pack(0, off, end-off)
+	n.meta = n.meta&opMask | pack(0, off, end-off)
 
 	return n
 }

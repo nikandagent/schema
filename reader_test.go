@@ -82,9 +82,9 @@ func TestBufferNodesPanic(tb *testing.T) {
 	mustPanic(tb, "Nodes(Type)", func() { b.Nodes(typ) })
 	mustPanic(tb, "NodesAt(Type)", func() { b.NodesAt(typ, 0) })
 
-	num := b.Deref(b.Keyword(s.Root(), Minimum))
-	mustPanic(tb, "Nodes(Number)", func() { b.Nodes(num) })
-	mustPanic(tb, "NodesAt(Number)", func() { b.NodesAt(num, 0) })
+	num := b.Keyword(s.Root(), Minimum)
+	mustPanic(tb, "Nodes(Minimum)", func() { b.Nodes(num) })
+	mustPanic(tb, "NodesAt(Minimum)", func() { b.NodesAt(num, 0) })
 }
 
 func TestBufferExt(tb *testing.T) {
@@ -562,7 +562,6 @@ func TestBufferDeref(tb *testing.T) {
 		{`{"not":{"type":"string"}}`, Not, All, ""},
 		{`{"items":{"type":"number"}}`, Items, All, ""},
 		{`{"const":5}`, Const, Number, "5"},
-		{`{"minimum":3}`, Minimum, Number, "3"},
 		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, If, All, ""},
 		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Then, All, ""},
 		{`{"if":{"type":"string"},"then":{"minLength":2},"else":{"type":"integer"}}`, Else, All, ""},
@@ -596,6 +595,20 @@ func TestBufferDeref(tb *testing.T) {
 
 	mustPanic(tb, "Deref(Properties)", func() { b.Deref(b.Keyword(s.Root(), Properties)) })
 	mustPanic(tb, "Deref(Type)", func() { b.Deref(b.Keyword(s.Root(), Type)) })
+
+	s, err = Compile([]byte(`{"minimum":3}`))
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	b = s.Reader()
+	num := b.Keyword(s.Root(), Minimum)
+
+	if got := string(b.Span(num)); got != "3" {
+		tb.Errorf("minimum span: got %q, want %q", got, "3")
+	}
+
+	mustPanic(tb, "Deref(Minimum)", func() { b.Deref(num) })
 }
 
 // TestNodeSrc pins that every node in a compiled program knows the schema text

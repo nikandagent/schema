@@ -276,7 +276,7 @@ func (a *Applier) applyStep(s *Schema, op, val Node, h Handler) (Node, error) {
 		return a.checkPatternProps(s, op, val, h)
 	case Format:
 		if s.Flags.Is(AssertStringFormat) && val.Op() == String &&
-			!formatOK(a.Buffer.Reader().Span(val), strFormat(op.Imm()), s.Flags) {
+			!formatOK(a.Buffer.Reader().Span(val), FormatOf(op), s.Flags) {
 			a.Fail(FormatMismatch, op, val)
 		}
 	case Pattern:
@@ -876,14 +876,12 @@ func (a *Applier) number(val Node) float64 {
 }
 
 func (a *Applier) schemaNum(s *Schema, op Node) float64 {
-	lit := s.prog.code[op.Off()]
-	v, _ := json2.Value(s.prog.Reader().Span(lit)).Float64()
+	v, _ := json2.Value(s.prog.Reader().Span(op)).Float64()
 	return v
 }
 
 func (a *Applier) multipleOf(s *Schema, op, val Node) bool {
-	lit := s.prog.code[op.Off()]
-	div := s.prog.Reader().Span(lit)
+	div := s.prog.Reader().Span(op)
 
 	var ok, exact bool
 
